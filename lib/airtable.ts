@@ -3,7 +3,8 @@
 // ─────────────────────────────────────────────────────────────
 
 const TOKEN = process.env.AIRTABLE_TOKEN || "";
-const BASE_ID = process.env.AIRTABLE_BASE_ID || "";
+// Default to the base created for this project; override via env if you fork it.
+const BASE_ID = process.env.AIRTABLE_BASE_ID || "appS9dwcribegqibV";
 const API = "https://api.airtable.com/v0";
 
 export const TABLES = {
@@ -13,6 +14,7 @@ export const TABLES = {
   ourAccounts: process.env.AIRTABLE_OUR_ACCOUNTS || "Our Accounts",
   ourReels: process.env.AIRTABLE_OUR_REELS || "Our Reels",
   snapshots: process.env.AIRTABLE_SNAPSHOTS || "Metric Snapshots",
+  accountSnapshots: process.env.AIRTABLE_ACCOUNT_SNAPSHOTS || "Account Snapshots",
 };
 
 export function airtableConfigured(): boolean {

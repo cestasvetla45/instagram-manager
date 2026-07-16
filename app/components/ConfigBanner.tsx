@@ -9,8 +9,8 @@ export default function ConfigBanner() {
   if (!status) return null;
   if (status.airtable && status.rocksolid) return null;
   const missing: string[] = [];
-  if (!status.airtable) missing.push("Airtable (AIRTABLE_TOKEN / AIRTABLE_BASE_ID)");
-  if (!status.rocksolid) missing.push("RockSolidAPIs (ROCKSOLID_BASE_URL / ROCKSOLID_API_KEY)");
+  if (!status.airtable) missing.push("Supabase (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)");
+  if (!status.rocksolid) missing.push("RockSolidAPIs (ROCKSOLID_API_KEY)");
   return (
     <div className="banner">
       ⚠ Not fully configured. Missing: {missing.join(", ")}. Set these env vars (see README) and redeploy.

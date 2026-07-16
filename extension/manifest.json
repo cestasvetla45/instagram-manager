@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Reel Lab — Creator Discovery Connector",
+  "version": "1.0.0",
+  "description": "Feeds creators Instagram shows this profile (related, suggested, Explore) into the Reel Lab discovery queue.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://*.instagram.com/*",
+    "https://*.up.railway.app/*",
+    "http://localhost:3000/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://*.instagram.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://*.instagram.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Reel Lab discovery"
+  }
+}

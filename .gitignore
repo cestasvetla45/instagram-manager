@@ -4,3 +4,8 @@ node_modules
 .env.local
 .DS_Store
 *.log
+.vercel
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+TASK*.md
+*.md

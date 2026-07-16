@@ -10,6 +10,8 @@ export function pct(frac: number | undefined | null): string {
 }
 
 export function attachUrl(att: any): string | null {
-  if (Array.isArray(att) && att[0]) return att[0].thumbnails?.large?.url || att[0].url || null;
+  if (!att) return null;
+  if (typeof att === "string") return att; // plain URL (Supabase)
+  if (Array.isArray(att) && att[0]) return att[0].thumbnails?.large?.url || att[0].url || null; // Airtable-style
   return null;
 }

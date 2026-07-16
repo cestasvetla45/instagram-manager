@@ -392,23 +392,38 @@ export async function scrapeUserReels(username: string, limit = 500): Promise<Re
   return out.slice(0, limit);
 }
 
+// Instagram media pks encode the post time in their upper bits:
+// timestamp_ms = (pk >> 23) + 1314220021721 (IG epoch). Accurate to ~2 min.
+// The user-reels endpoint stopped returning taken_at, so this is the only
+// way to get posted dates from the bulk feed.
+const IG_EPOCH_MS = 1314220021721n;
+function pkToMs(pk: string): number | null {
+  const digits = String(pk || "").split("_")[0];
+  if (!/^\d{10,}$/.test(digits)) return null;
+  const ms = Number((BigInt(digits) >> 23n) + IG_EPOCH_MS);
+  // sanity: between 2010 and tomorrow
+  if (ms < 1262304000000 || ms > Date.now() + 86400000) return null;
+  return ms;
+}
+
 function pushReels(items: any[], clean: string, out: ReelStub[]) {
   for (const it of items) {
     const m = it?.node?.media || it?.media || it?.node || it;
     if (!m) continue;
     const code = str(m.code || m.shortcode);
+    const takenMs = pkToMs(str(m.pk || m.id));
     out.push({
       url: `https://www.instagram.com/reel/${code}/`,
       shortcode: code,
       mediaId: str(m.pk || m.id),
       authorHandle: str(m?.user?.username || clean),
-      caption: str(m?.caption?.text || ""),
+      caption: str(m?.caption?.text ?? m?.caption_text ?? (typeof m?.caption === "string" ? m.caption : "")),
       views: num(m.play_count || m.view_count || m.ig_play_count),
       likes: num(m.like_count),
       comments: num(m.comment_count),
       thumbnailUrl: str(m?.image_versions2?.candidates?.[0]?.url) || null,
-      postedDate: tsToDate(m.taken_at),
-      postedAtISO: tsToISO(m.taken_at),
+      postedDate: tsToDate(m.taken_at) ?? (takenMs ? new Date(takenMs).toISOString().slice(0, 10) : null),
+      postedAtISO: tsToISO(m.taken_at) ?? (takenMs ? new Date(takenMs).toISOString() : null),
       coauthors: (Array.isArray(m?.coauthor_producers) ? m.coauthor_producers : [])
         .map((u: any) => str(u?.username).toLowerCase())
         .filter(Boolean),

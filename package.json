@@ -1,23 +1,28 @@
 {
   "name": "instagram-manager",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p ${PORT:-3000}",
+    "worker": "tsx worker/index.ts",
+    "worker:discovery": "tsx worker/discovery.ts",
     "lint": "next lint"
   },
   "dependencies": {
-    "next": "14.2.5",
+    "@supabase/supabase-js": "2.45.4",
+    "next": "14.2.35",
+    "pg": "^8.22.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "recharts": "2.12.7"
+    "recharts": "2.12.7",
+    "tsx": "4.19.1"
   },
   "devDependencies": {
-    "typescript": "5.5.4",
     "@types/node": "20.14.12",
     "@types/react": "18.3.3",
-    "@types/react-dom": "18.3.0"
+    "@types/react-dom": "18.3.0",
+    "typescript": "5.5.4"
   }
 }
