@@ -19,6 +19,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "🎯 Inspiration",
     items: [
+      { href: "/trending-models", label: "🔥 Trending Models" },
       { href: "/inspiration-library", label: "Inspiration Library" },
       { href: "/inspiration-accounts", label: "Inspiration Accounts" },
       { href: "/inspiration", label: "Inspiration Reels" },

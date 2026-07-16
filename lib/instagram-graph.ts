@@ -286,50 +286,51 @@ export function oauthConfigured(): boolean {
   return Boolean(META_APP_ID && META_APP_SECRET);
 }
 
-// Generate the OAuth URL for the user to log in. Business/Creator IG
-// accounts authenticate through Facebook Login (the account must be
-// linked to a Facebook Page) — api.instagram.com only accepts Basic
-// Display scopes and rejects these, so the dialog must be facebook.com.
+// Generate the OAuth URL for the user to log in directly with Instagram
+// (no Facebook Page required — works for standalone Creator accounts).
 export function getOAuthUrl(state?: string): string {
   const params = new URLSearchParams({
     client_id: META_APP_ID,
     redirect_uri: REDIRECT_URI,
-    scope: "instagram_basic,instagram_manage_insights,pages_show_list,pages_read_engagement",
+    scope: "instagram_basic,instagram_manage_insights",
     response_type: "code",
     ...(state ? { state } : {}),
   });
-  return `https://www.facebook.com/v21.0/dialog/oauth?${params.toString()}`;
+  return `https://api.instagram.com/oauth/authorize?${params.toString()}`;
 }
 
-// Exchange the authorization code for a short-lived USER token.
-// Response: { access_token, token_type, expires_in } | { error }.
+// Exchange the authorization code for a short-lived access token.
+// Instagram Login uses api.instagram.com (not graph.facebook.com).
 export async function exchangeCodeForToken(code: string): Promise<any> {
-  const params = new URLSearchParams({
+  const body = new URLSearchParams({
     client_id: META_APP_ID,
     client_secret: META_APP_SECRET,
+    grant_type: "authorization_code",
     redirect_uri: REDIRECT_URI,
     code,
   });
-  const res = await fetch(`${BASE}/oauth/access_token?${params.toString()}`);
-  return res.json();
-}
-
-// Exchange a short-lived user token for a long-lived one (~60 days).
-export async function getLongLivedToken(shortToken: string): Promise<any> {
-  const params = new URLSearchParams({
-    grant_type: "fb_exchange_token",
-    client_id: META_APP_ID,
-    client_secret: META_APP_SECRET,
-    fb_exchange_token: shortToken,
+  const res = await fetch("https://api.instagram.com/oauth/access_token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
   });
-  const res = await fetch(`${BASE}/oauth/access_token?${params.toString()}`);
   return res.json();
 }
 
-// Refresh a long-lived token (fb_exchange_token also accepts a still-valid
-// long-lived token and returns a fresh 60-day one).
+// Exchange a short-lived token for a long-lived one (~60 days).
+// Instagram Login uses graph.instagram.com (not graph.facebook.com).
+export async function getLongLivedToken(shortToken: string): Promise<any> {
+  const url = `https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${META_APP_SECRET}&access_token=${shortToken}`;
+  const res = await fetch(url);
+  return res.json();
+}
+
+// Refresh a long-lived token (resets the 60-day expiry).
+// Instagram Login uses graph.instagram.com/refresh_access_token.
 export async function refreshLongLivedToken(token: string): Promise<any> {
-  return getLongLivedToken(token);
+  const url = `https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${token}`;
+  const res = await fetch(url);
+  return res.json();
 }
 
 // The user's Facebook Pages — each carries its own page access_token.
