@@ -27,6 +27,11 @@ function calcViralScore(views: number, viewFollowRatio: number, velocity: number
   else if (velocity > 1000) score += 20;
   else if (velocity > 500) score += 10;
 
+  // Hard rule: >100K views reaching 5x beyond the follower base is viral,
+  // even when velocity is unknown (the weighted parts alone would sit at 40).
+  // Floor the score at 50 so score and is_viral never disagree.
+  if (views > 100_000 && viewFollowRatio > 5) score = Math.max(score, 50);
+
   return { score, isViral: score >= 50 };
 }
 
@@ -37,10 +42,11 @@ export async function calcViralBatch(
 
   // Fetch reels that need checking
   let reels: any[] = [];
+  const COLS = "reel_url, author_handle, views, view_follow_ratio, posted_at, followers_at_scrape, is_viral";
   if (opts.reelUrls?.length) {
     const { data } = await db()
       .from(TABLES.inspirationReels)
-      .select("reel_url, views, view_follow_ratio, posted_at, followers_at_scrape")
+      .select(COLS)
       .in("reel_url", opts.reelUrls.filter(Boolean))
       .limit(limit);
     reels = data || [];
@@ -48,7 +54,7 @@ export async function calcViralBatch(
     const cutoff = new Date(Date.now() - SIX_HOURS_MS).toISOString();
     const { data } = await db()
       .from(TABLES.inspirationReels)
-      .select("reel_url, views, view_follow_ratio, posted_at, followers_at_scrape")
+      .select(COLS)
       .or(`last_trend_check.is.null,last_trend_check.lt.${cutoff}`)
       .limit(limit);
     reels = data || [];
@@ -58,6 +64,8 @@ export async function calcViralBatch(
   let checked = 0;
   let viralFound = 0;
   const failed: any[] = [];
+  // Authors whose reels CROSSED the viral threshold this run → "rising" accounts.
+  const newlyViralAuthors = new Set<string>();
 
   for (const reel of reels) {
     try {
@@ -87,8 +95,22 @@ export async function calcViralBatch(
 
       checked++;
       if (isViral) viralFound++;
+      if (isViral && !reel.is_viral && reel.author_handle) newlyViralAuthors.add(reel.author_handle);
     } catch (e: any) {
       failed.push({ reel_url: reel.reel_url, error: e?.message || String(e) });
+    }
+  }
+
+  // Rising-account detection: an account that just had a reel go viral gets
+  // flagged so /api/trending-models can surface newly-discovered creators.
+  if (newlyViralAuthors.size) {
+    try {
+      await db()
+        .from(TABLES.inspirationAccounts)
+        .update({ is_rising: true, last_viral_at: now.toISOString() })
+        .in("handle", [...newlyViralAuthors]);
+    } catch {
+      /* columns may not exist on older DBs — non-fatal */
     }
   }
 

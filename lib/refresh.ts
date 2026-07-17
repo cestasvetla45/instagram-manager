@@ -4,7 +4,7 @@
 // returns every reel for a handle with fresh view/like/comment counts, so we
 // update N reels for the cost of 1 API call instead of ~2 calls per reel.
 import { db, TABLES } from "./db";
-import { scrapeUserReels } from "./rocksolid";
+import { scrapeUserReels, scrapeReel } from "./rocksolid";
 import { detectAndAddNewPosts, snapshotAccounts } from "./accounts";
 import { enrichBacklog } from "./discover";
 import { calcViralBatch } from "./viral";
@@ -76,17 +76,45 @@ async function refreshOurReelsViaScraper() {
     try {
       // One call gets ALL reels for this account with updated stats.
       const reels = await scrapeUserReels(acct.handle, 50);
-      for (const r of reels) {
-        await db()
+      if (reels.length === 0) {
+        // Bulk scrape returned nothing — fall back to per-reel scraping
+        const { data: existing } = await db()
           .from(TABLES.ourReels)
-          .update({
-            views: r.views,
-            likes: r.likes,
-            comments: r.comments,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("reel_url", r.url);
-        refreshed++;
+          .select("reel_url")
+          .eq("account_handle", acct.handle)
+          .limit(50);
+        for (const r of existing || []) {
+          try {
+            const fresh = await scrapeReel(r.reel_url);
+            await db()
+              .from(TABLES.ourReels)
+              .update({
+                views: fresh.views,
+                likes: fresh.likes,
+                comments: fresh.comments,
+                shares: fresh.shares,
+                saves: fresh.saves,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("reel_url", r.reel_url);
+            refreshed++;
+          } catch {
+            failed++;
+          }
+        }
+      } else {
+        for (const r of reels) {
+          await db()
+            .from(TABLES.ourReels)
+            .update({
+              views: r.views,
+              likes: r.likes,
+              comments: r.comments,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("reel_url", r.url);
+          refreshed++;
+        }
       }
     } catch {
       failed++;

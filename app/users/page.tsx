@@ -9,12 +9,13 @@ export default function UsersPage() {
   const [label, setLabel] = useState("");
   const [msg, setMsg] = useState("");
   const [forbidden, setForbidden] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   function load() {
     fetch("/api/users").then((r) => {
       if (r.status === 403 || r.status === 401) { setForbidden(true); return { users: [] }; }
       return r.json();
-    }).then((j) => setUsers(j.users || []));
+    }).then((j) => { setUsers(j.users || []); setLoading(false); });
   }
   useEffect(load, []);
 
@@ -60,7 +61,7 @@ export default function UsersPage() {
 
       <div className="panel">
         <h2>Team</h2>
-        {users.length === 0 ? <p className="muted">No users yet (the root admin from your Railway env isn&rsquo;t listed here).</p> : (
+        {loading ? <p className="muted"><span className="spinner" /> Loading…</p> : users.length === 0 ? <p className="muted">No users yet (the root admin from your Railway env isn&rsquo;t listed here).</p> : (
           <table>
             <thead><tr><th>Username</th><th>Role</th><th>Name</th><th>Added</th><th></th></tr></thead>
             <tbody>

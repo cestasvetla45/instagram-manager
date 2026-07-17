@@ -201,7 +201,7 @@ function CandidateCard({
     <div className="panel" style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
       {c.profile_pic_url ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={c.profile_pic_url} alt="" style={{ width: 56, height: 56, borderRadius: "50%", flexShrink: 0 }} />
+        <img src={c.profile_pic_url} alt="" style={{ width: 56, height: 56, borderRadius: "50%", flexShrink: 0 }} loading="lazy" decoding="async" />
       ) : (
         <div style={{ width: 56, height: 56, borderRadius: "50%", background: "#333", flexShrink: 0 }} />
       )}
@@ -242,7 +242,7 @@ function CandidateCard({
               <a key={i} href={r.url} target="_blank" rel="noreferrer" title={`${fmt(r.views)} views`}>
                 {r.thumbnail_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={r.thumbnail_url} alt="" style={{ width: 64, height: 96, objectFit: "cover", borderRadius: 8 }} />
+                  <img src={r.thumbnail_url} alt="" style={{ width: 64, height: 96, objectFit: "cover", borderRadius: 8 }} loading="lazy" decoding="async" />
                 ) : (
                   <span style={{ fontSize: 12 }}>{fmt(r.views)} views ↗</span>
                 )}

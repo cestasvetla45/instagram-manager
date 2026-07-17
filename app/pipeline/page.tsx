@@ -460,7 +460,7 @@ export default function PipelinePage() {
                           {a.brief?.variant_label && <span className="badge" style={{ marginLeft: 8, fontSize: 11 }}>{a.brief.variant_label}</span>}
                           {a.brief?.reference_thumbnail && (
                             // eslint-disable-next-line @next/next/no-img-element
-                            <img src={a.brief.reference_thumbnail} alt="ref" style={{ width: 60, height: 60, borderRadius: 6, objectFit: "cover", marginLeft: 8, verticalAlign: "middle" }} />
+                            <img src={a.brief.reference_thumbnail} alt="ref" style={{ width: 60, height: 60, borderRadius: 6, objectFit: "cover", marginLeft: 8, verticalAlign: "middle" }} loading="lazy" decoding="async" />
                           )}
                           {a.brief?.generation_prompt && <div style={{ fontSize: 12, marginTop: 4, maxHeight: 40, overflow: "auto" }}>{a.brief.generation_prompt}</div>}
                           {a.brief?.reference_reel_url && <a href={a.brief.reference_reel_url} target="_blank" rel="noreferrer" className="badge" style={{ marginTop: 4 }}>↗ reference reel</a>}

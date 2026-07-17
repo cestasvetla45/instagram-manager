@@ -94,7 +94,10 @@ export async function GET(req: NextRequest) {
     const start = (page - 1) * limit;
     const pageRows = rows.slice(start, start + limit);
 
-    return NextResponse.json({ accounts: pageRows, total, page });
+    return NextResponse.json(
+      { accounts: pageRows, total, page },
+      { headers: { "Cache-Control": "public, s-maxage=30, stale-while-revalidate=15" } }
+    );
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || String(e), accounts: [], total: 0 }, { status: 500 });
   }

@@ -30,7 +30,7 @@ function AccountTable({ type }: { type: "inspiration" | "our" }) {
               <td style={{ width: 40 }}>
                 {pic ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={pic} alt="" style={{ width: 32, height: 32, borderRadius: "50%" }} />
+                  <img src={pic} alt="" style={{ width: 32, height: 32, borderRadius: "50%" }} loading="lazy" decoding="async" />
                 ) : null}
               </td>
               <td>

@@ -120,10 +120,11 @@ export default function VADailyPage() {
   const [clAcct, setClAcct] = useState("");
   const [done, setDone] = useState<Set<string>>(new Set());
   const [acctView, setAcctView] = useState<any[]>([]);
+  const [acctViewLoading, setAcctViewLoading] = useState(true);
   const etDay = etToday();
 
   function loadAccountsView() {
-    fetch(`/api/va/accounts?day=${etDay}`).then((r) => r.json()).then((j) => setAcctView(j.accounts || []));
+    fetch(`/api/va/accounts?day=${etDay}`).then((r) => r.json()).then((j) => { setAcctView(j.accounts || []); setAcctViewLoading(false); });
   }
   function loadChecklist(a: string) {
     if (!a) { setDone(new Set()); return; }
@@ -263,7 +264,9 @@ export default function VADailyPage() {
               </div>
             );
           })}
-          {acctView.length === 0 && <p className="muted">No accounts yet.</p>}
+          {acctViewLoading ? (
+            <p className="muted"><span className="spinner" /> Loading…</p>
+          ) : acctView.length === 0 && <p className="muted">No accounts yet.</p>}
         </div>
       </div>
 

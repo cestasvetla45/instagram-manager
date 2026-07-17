@@ -174,7 +174,13 @@ export default function AdminDashboard() {
         <div className="row" style={{ justifyContent: "space-between" }}>
           <h2 style={{ margin: 0 }}>Worker Cycle History</h2>
           <span className="badge">
-            {worker.nextCycleIn == null ? `interval ${worker.intervalMinutes} min` : `Next cycle in ~${worker.nextCycleIn} min`}
+            {worker.mode === "continuous"
+              ? worker.alive
+                ? `⚡ live — batch every ${worker.batchEverySec || 30}s`
+                : "⚠ worker quiet >5 min"
+              : worker.nextCycleIn == null
+                ? `interval ${worker.intervalMinutes} min`
+                : `Next cycle in ~${worker.nextCycleIn} min`}
           </span>
         </div>
         {(!cycles || cycles.length === 0) ? (
@@ -186,9 +192,9 @@ export default function AdminDashboard() {
                 <th style={th}>Started</th>
                 <th style={th}>Duration</th>
                 <th style={th}>Accounts</th>
-                <th style={th}>Reels Imported</th>
-                <th style={th}>New Posts</th>
-                <th style={th}>Viral Found</th>
+                <th style={th}>Refreshed</th>
+                <th style={th}>Ingested</th>
+                <th style={th}>Failed</th>
                 <th style={th}>Status</th>
               </tr>
             </thead>
@@ -196,12 +202,12 @@ export default function AdminDashboard() {
               {[...cycles].reverse().map((c: any, i: number) => (
                 <tr key={i}>
                   <td style={td}>{timeHM(c.startedAt)}</td>
-                  <td style={td}>{Math.round(c.durationSec / 60)}min</td>
-                  <td style={td}>{fmt(c.result?.accounts || 0)}</td>
-                  <td style={td}>{fmt(c.result?.reelsImported || 0)}</td>
-                  <td style={td}>{fmt(c.result?.newPosts || 0)}</td>
-                  <td style={td}>{fmt(c.result?.viralFound || 0)}</td>
-                  <td style={td}>{c.result?.error ? <span style={{ color: BAD }}>⚠ Error</span> : <span style={{ color: GOOD }}>✅ Done</span>}</td>
+                  <td style={td}>{c.durationSec >= 90 ? `${Math.round(c.durationSec / 60)}min` : `${Math.round(c.durationSec || 0)}s`}</td>
+                  <td style={td}>{fmt(c.accounts ?? c.result?.accounts ?? 0)}</td>
+                  <td style={td}>{fmt(c.refreshed ?? c.result?.reelsImported ?? 0)}</td>
+                  <td style={td}>{fmt(c.ingested ?? c.result?.newPosts ?? 0)}</td>
+                  <td style={td}>{fmt(c.failed ?? 0)}</td>
+                  <td style={td}>{(c.failed ?? 0) > 0 || c.result?.error ? <span style={{ color: WARN }}>⚠ {fmt(c.failed ?? 0)} failed</span> : <span style={{ color: GOOD }}>✅ Done</span>}</td>
                 </tr>
               ))}
             </tbody>

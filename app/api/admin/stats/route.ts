@@ -64,20 +64,60 @@ async function databaseStats() {
   };
 }
 
-export async function GET() {
-  const api = getApiStats();
-  const cycles = getCycleHistory();
-  const database = await databaseStats();
+// The worker runs as a separate Railway service, so its in-memory API stats
+// and cycle history are invisible here. It persists them to Postgres every
+// batch (worker_api_stats / worker_cycles) — prefer those; fall back to this
+// process's own in-memory stats when the worker hasn't reported recently.
+async function workerApiStats(): Promise<any | null> {
+  try {
+    const { data, error } = await db().from("worker_api_stats").select("stats, updated_at").eq("id", 1).limit(1);
+    if (error) console.error("worker_api_stats query error:", error.message);
+    const row = data?.[0];
+    if (!row?.stats) return null;
+    // Stale after 10 min → worker is down; don't show frozen numbers as live.
+    if (Date.now() - new Date(row.updated_at).getTime() > 10 * 60 * 1000) return null;
+    return { ...row.stats, reportedAt: row.updated_at, source: "worker" };
+  } catch {
+    return null;
+  }
+}
 
-  const intervalMinutes = Number(process.env.WORKER_INTERVAL_MINUTES || 120);
+async function workerCycles(): Promise<any[]> {
+  try {
+    const { data, error } = await db()
+      .from("worker_cycles")
+      .select("batch_no, started_at, duration_sec, accounts, refreshed, failed, extras")
+      .order("id", { ascending: false })
+      .limit(20);
+    if (error) console.error("worker_cycles query error:", error.message);
+    return (data || [])
+      .reverse()
+      .map((c: any) => ({
+        batchNo: c.batch_no,
+        startedAt: c.started_at,
+        durationSec: Number(c.duration_sec || 0),
+        accounts: c.accounts,
+        refreshed: c.refreshed,
+        failed: c.failed,
+        ...(c.extras || {}),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export async function GET() {
+  const [dbApi, dbCycles, database] = await Promise.all([workerApiStats(), workerCycles(), databaseStats()]);
+  const api = dbApi || getApiStats();
+  const cycles = dbCycles.length ? dbCycles : getCycleHistory();
+
+  // Continuous worker: batches run back-to-back and take ~6 min each
+  // (10 accounts, per-reel fallbacks). "Alive" = a cycle started in the
+  // last 15 min — a 5 min window flags a healthy worker as dead mid-batch.
   const enrichPerCycle = Number(process.env.ENRICH_PER_CYCLE || 8);
   const last = cycles.length ? cycles[cycles.length - 1] : null;
   const lastCycleAt = last?.startedAt || null;
-  let nextCycleIn: number | null = null;
-  if (lastCycleAt) {
-    const elapsedMin = (Date.now() - new Date(lastCycleAt).getTime()) / 60000;
-    nextCycleIn = Math.max(0, Math.round(intervalMinutes - elapsedMin));
-  }
+  const alive = lastCycleAt ? Date.now() - new Date(lastCycleAt).getTime() < 15 * 60 * 1000 : false;
 
   const configured = (v: any) => (v ? "configured" : "not configured");
   const env = {
@@ -89,11 +129,14 @@ export async function GET() {
     metaAppId: configured(process.env.META_APP_ID),
   };
 
-  return NextResponse.json({
-    api,
-    cycles,
-    database,
-    worker: { lastCycleAt, nextCycleIn, intervalMinutes, enrichPerCycle },
-    env,
-  });
+  return NextResponse.json(
+    {
+      api,
+      cycles,
+      database,
+      worker: { lastCycleAt, alive, mode: "continuous", batchEverySec: 30, enrichPerCycle },
+      env,
+    },
+    { headers: { "Cache-Control": "public, s-maxage=10, stale-while-revalidate=5" } }
+  );
 }

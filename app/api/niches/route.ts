@@ -11,7 +11,10 @@ export async function GET() {
       .select("*")
       .order("name", { ascending: true });
     if (error) throw error;
-    return NextResponse.json({ niches: data || [] });
+    return NextResponse.json(
+      { niches: data || [] },
+      { headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=150" } }
+    );
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || String(e), niches: [] }, { status: 500 });
   }

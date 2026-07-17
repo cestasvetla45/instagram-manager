@@ -121,7 +121,7 @@ export default function TrendingModels() {
               <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "nowrap" }}>
                 {m.profile_pic ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={m.profile_pic} alt={m.handle} width={44} height={44} style={{ borderRadius: "50%", objectFit: "cover", width: 44, height: 44, flexShrink: 0 }} />
+                  <img src={m.profile_pic} alt={m.handle} width={44} height={44} style={{ borderRadius: "50%", objectFit: "cover", width: 44, height: 44, flexShrink: 0 }} loading="lazy" decoding="async" />
                 ) : (
                   <div style={{ width: 44, height: 44, borderRadius: "50%", background: "var(--panel-2)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, flexShrink: 0 }}>
                     {(m.handle || "?").charAt(0).toUpperCase()}
@@ -151,7 +151,7 @@ export default function TrendingModels() {
                       <a key={i} href={r.reel_url} target="_blank" rel="noreferrer" style={{ display: "block", textAlign: "center" }}>
                         {r.thumbnail_url ? (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img src={r.thumbnail_url} alt="" style={{ width: 90, height: 120, objectFit: "cover", borderRadius: 8 }} />
+                          <img src={r.thumbnail_url} alt="" style={{ width: 90, height: 120, objectFit: "cover", borderRadius: 8 }} loading="lazy" decoding="async" />
                         ) : (
                           <div style={{ width: 90, height: 120, borderRadius: 8, background: "var(--panel-2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>
                             🎬

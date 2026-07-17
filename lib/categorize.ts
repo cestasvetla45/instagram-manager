@@ -156,8 +156,44 @@ export async function categorizeReelRow(reel: any): Promise<CategorizeResult> {
   };
 }
 
+const GEMINI_GAP_MS = 2000; // pause between Gemini calls — avoids rate limits
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Categorize a list of already-fetched rows serially with the rate-limit gap.
+// Shared by autoCategorizeNew (worker) and the categorize API route.
+export async function categorizeRows(rows: any[]): Promise<{
+  scanned: number;
+  categorized: number;
+  low_confidence: number;
+  failed: any[];
+  results: CategorizeResult[];
+}> {
+  let categorized = 0;
+  let low = 0;
+  const failed: any[] = [];
+  const results: CategorizeResult[] = [];
+  for (const reel of rows) {
+    try {
+      if (categorized + failed.length > 0) await sleep(GEMINI_GAP_MS);
+      const r = await categorizeReelRow(reel);
+      if (r.ok) {
+        categorized++;
+        if (r.low_confidence) low++;
+        results.push(r);
+      } else {
+        failed.push({ reel_url: reel.reel_url, error: r.error });
+      }
+    } catch (e: any) {
+      failed.push({ reel_url: reel.reel_url, error: e?.message || String(e) });
+    }
+  }
+  return { scanned: rows.length, categorized, low_confidence: low, failed, results };
+}
+
 // Worker entry point — categorize a batch of freshly-discovered reels.
-export async function autoCategorizeNew(limit = 8): Promise<any> {
+// Small batches (3) with a 2s gap between Gemini calls; viral reels first —
+// they're the ones worth learning from, so they get categorized soonest.
+export async function autoCategorizeNew(limit = 3): Promise<any> {
   if (!geminiConfigured()) return { categorized: 0, skipped: "gemini_not_configured" };
 
   const { data } = await db()
@@ -166,24 +202,10 @@ export async function autoCategorizeNew(limit = 8): Promise<any> {
     .is("sub_category", null)
     .is("ai_categorized_at", null)
     .not("video_url", "is", null)
-    .limit(Math.min(Math.max(limit, 1), 8));
-  const rows = data || [];
+    .order("is_viral", { ascending: false })
+    .order("viral_score", { ascending: false, nullsFirst: false })
+    .limit(Math.min(Math.max(limit, 1), 3));
 
-  let categorized = 0;
-  let low = 0;
-  const failed: any[] = [];
-  for (const reel of rows) {
-    try {
-      const r = await categorizeReelRow(reel);
-      if (r.ok) {
-        categorized++;
-        if (r.low_confidence) low++;
-      } else {
-        failed.push({ reel_url: reel.reel_url, error: r.error });
-      }
-    } catch (e: any) {
-      failed.push({ reel_url: reel.reel_url, error: e?.message || String(e) });
-    }
-  }
-  return { scanned: rows.length, categorized, low_confidence: low, failed };
+  const { results: _results, ...summary } = await categorizeRows(data || []);
+  return summary;
 }

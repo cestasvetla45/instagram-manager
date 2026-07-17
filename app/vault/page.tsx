@@ -16,6 +16,7 @@ export default function VaultPage() {
   const [nicheFilter, setNicheFilter] = useState("all");
   const [uploading, setUploading] = useState(false);
   const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(true);
 
   // upload form
   const [upKind, setUpKind] = useState("carousel");
@@ -46,7 +47,7 @@ export default function VaultPage() {
   }
 
   function load() {
-    fetch(`/api/vault?kind=${kindFilter}&used=${usedFilter}&niche=${encodeURIComponent(nicheFilter)}`).then((r) => r.json()).then((j) => setAssets(j.assets || []));
+    fetch(`/api/vault?kind=${kindFilter}&used=${usedFilter}&niche=${encodeURIComponent(nicheFilter)}`).then((r) => r.json()).then((j) => { setAssets(j.assets || []); setLoading(false); });
   }
   useEffect(load, [kindFilter, usedFilter, nicheFilter]);
   useEffect(() => {
@@ -144,7 +145,9 @@ export default function VaultPage() {
         </select>
       </div>
 
-      {assets.length === 0 ? (
+      {loading ? (
+        <p className="muted"><span className="spinner" /> Loading…</p>
+      ) : assets.length === 0 ? (
         <p className="muted">Nothing here yet. Upload content above to start staging.</p>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 12 }}>

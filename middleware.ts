@@ -34,7 +34,7 @@ export async function middleware(req: NextRequest) {
   if (pathname.startsWith("/api/telegram/")) return NextResponse.next();
 
   // Instagram Graph API OAuth flow — public (phone login pages)
-  if (pathname === "/connect" || pathname.startsWith("/api/instagram-graph/")) return NextResponse.next();
+  if (pathname === "/connect" || pathname === "/stats" || pathname.startsWith("/api/instagram-graph/") || pathname.startsWith("/api/reels/update")) return NextResponse.next();
 
   // Internal server-to-server calls from the Telegram webhook carry a
   // shared secret header instead of a session cookie.

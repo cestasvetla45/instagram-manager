@@ -307,7 +307,10 @@ function GalleryTab({
       });
       const j = await res.json();
       if (j.error) setCatMsg(`Error: ${j.error}`);
-      else {
+      else if (j.background) {
+        setCatMsg(`🚀 Categorizing ${j.queued} reels in the background (viral first) — refresh in a minute`);
+        setTimeout(loadReels, 45_000);
+      } else {
         setCatMsg(`✨ Categorized ${j.categorized} · ${j.low_confidence} need review · ${j.failed?.length || 0} failed`);
         loadReels();
       }

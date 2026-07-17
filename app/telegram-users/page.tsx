@@ -26,12 +26,13 @@ export default function TelegramUsersPage() {
   const [role, setRole] = useState("va");
   const [msg, setMsg] = useState("");
   const [forbidden, setForbidden] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   function load() {
     fetch("/api/telegram-users").then((r) => {
       if (r.status === 403 || r.status === 401) { setForbidden(true); return { users: [] }; }
       return r.json();
-    }).then((j) => setUsers(j.users || []));
+    }).then((j) => { setUsers(j.users || []); setLoading(false); });
     fetch("/api/telegram/status").then((r) => r.json()).then((j) => setBot(j.bot || null)).catch(() => {});
   }
   useEffect(load, []);
@@ -94,7 +95,7 @@ export default function TelegramUsersPage() {
 
       <div className="panel">
         <h2>Authorized users</h2>
-        {users.length === 0 ? <p className="muted">No authorized Telegram users yet.</p> : (
+        {loading ? <p className="muted"><span className="spinner" /> Loading…</p> : users.length === 0 ? <p className="muted">No authorized Telegram users yet.</p> : (
           <table>
             <thead><tr><th>Telegram ID</th><th>Username</th><th>Name</th><th>Role</th><th>Status</th><th></th></tr></thead>
             <tbody>

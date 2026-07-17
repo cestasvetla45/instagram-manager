@@ -77,7 +77,7 @@ export async function GET(req: NextRequest) {
     const { data: accounts } = handles.length
       ? await db()
           .from(TABLES.inspirationAccounts)
-          .select("handle, full_name, followers, niche, profile_pic_url")
+          .select("handle, full_name, followers, niche, profile_pic_url, is_rising, last_viral_at, date_added")
           .in("handle", handles)
       : { data: [] as any[] };
 
@@ -135,7 +135,17 @@ export async function GET(req: NextRequest) {
       const reelCount = totalCountByHandle[handle] || viralReelCount;
       const viralRate = reelCount ? Math.round((viralReelCount / reelCount) * 1000) / 10 : 0;
 
+      // "Rising" = the worker saw one of this creator's reels cross the viral
+      // threshold in the last 72h — a newly-discovered viral creator.
+      const RISING_MS = 72 * 60 * 60 * 1000;
+      const lastViralAt = account?.last_viral_at || null;
+      const rising = Boolean(
+        account?.is_rising && lastViralAt && Date.now() - new Date(lastViralAt).getTime() < RISING_MS
+      );
+
       return {
+        rising,
+        last_viral_at: lastViralAt,
         handle,
         full_name: account?.full_name || null,
         followers: account?.followers != null ? Number(account.followers) : null,
@@ -153,9 +163,11 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    // 6. Sort by total_views desc, slice to limit
-    models.sort((a, b) => b.total_views - a.total_views);
+    // 6. Sort by total_views desc (rising creators bubble to the top of equal
+    // tiers via a secondary sort), slice to limit
+    models.sort((a, b) => b.total_views - a.total_views || Number(b.rising) - Number(a.rising));
     const limited = models.slice(0, limit);
+    const risingModels = models.filter((m) => m.rising).slice(0, 10);
 
     // 7. Summary
     const totalViralReels = limited.reduce((s, m) => s + m.viral_reel_count, 0);
@@ -184,16 +196,21 @@ export async function GET(req: NextRequest) {
       if (avg > fastestAvg) { fastestAvg = avg; fastestRising = n; }
     }
 
-    return NextResponse.json({
-      models: limited,
-      summary: {
-        total_models: limited.length,
-        total_viral_reels: totalViralReels,
-        total_views: totalViews,
-        hottest_niche: hottestNiche,
-        fastest_rising: fastestRising,
+    return NextResponse.json(
+      {
+        models: limited,
+        rising_models: risingModels,
+        summary: {
+          total_models: limited.length,
+          total_viral_reels: totalViralReels,
+          total_views: totalViews,
+          hottest_niche: hottestNiche,
+          fastest_rising: fastestRising,
+          rising_count: risingModels.length,
+        },
       },
-    });
+      { headers: { "Cache-Control": "public, s-maxage=120, stale-while-revalidate=60" } }
+    );
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
   }
