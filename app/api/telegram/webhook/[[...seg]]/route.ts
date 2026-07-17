@@ -133,6 +133,7 @@ const COMMAND_ROLES: Record<string, string[]> = {
   "/unassign": ["admin"],
   "/vas": ["admin"],
   "/schedule": ["admin", "va"],
+  "/syncmembers": ["admin"],
 };
 
 // Roles that may run the paste-links import flow.
@@ -217,6 +218,7 @@ function helpFor(role: string): string {
     lines.push("/banned — Check if any accounts are banned/inaccessible");
     lines.push("/notifybans — Toggle auto ban notifications");
     lines.push("/vas — List VAs and their assigned accounts");
+    lines.push("/syncmembers — Sync TeamFlow members into the VA system");
     lines.push("/assign <account_handle> <va_name> — Assign an account to a VA");
     lines.push("/unassign <account_handle> — Unassign an account");
     lines.push("/schedule <account_handle> — Show an account's posting schedule");
@@ -945,6 +947,86 @@ async function cmdVas(chatId: number) {
   return sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown", disable_web_page_preview: true });
 }
 
+// /syncmembers — pull TeamFlow members (tf_members, same shared Supabase) into
+// va_profiles + telegram_users. Members without a telegram_id are skipped.
+async function cmdSyncMembers(chatId: number) {
+  try {
+    const [{ data: members }, { data: memberTeams }, { data: teams }] = await Promise.all([
+      db().from("tf_members").select("*").eq("status", "active"),
+      db().from("tf_member_teams").select("member_id, team_id"),
+      db().from("tf_teams").select("id, name"),
+    ]);
+
+    const teamNamesFor = (memberId: string): string[] => {
+      const ids = (memberTeams || []).filter((r: any) => r.member_id === memberId).map((r: any) => r.team_id);
+      return (teams || []).filter((t: any) => ids.includes(t.id)).map((t: any) => String(t.name));
+    };
+
+    const synced: string[] = [];
+    const skipped: string[] = [];
+    const errors: string[] = [];
+
+    for (const m of (members || []) as any[]) {
+      if (!m.telegram_id) {
+        skipped.push(m.name);
+        continue;
+      }
+      const isManager = teamNamesFor(m.id).some((t) => t.toLowerCase().includes("manager"));
+      const profileRole = isManager ? "manager" : "va";
+      const userRole = isManager ? "content" : "va";
+
+      try {
+        // Manual upsert into va_profiles — match by telegram_id, then name.
+        const { data: byTid } = await db().from("va_profiles").select("id").eq("telegram_id", m.telegram_id).limit(1);
+        let profileId = byTid?.[0]?.id as string | undefined;
+        if (!profileId) {
+          const { data: byName } = await db().from("va_profiles").select("id").ilike("name", m.name).limit(1);
+          profileId = byName?.[0]?.id;
+        }
+        if (profileId) {
+          const { error } = await db()
+            .from("va_profiles")
+            .update({ name: m.name, telegram_id: m.telegram_id, role: profileRole, is_active: true, updated_at: new Date().toISOString() })
+            .eq("id", profileId);
+          if (error) throw error;
+        } else {
+          const { error } = await db()
+            .from("va_profiles")
+            .insert({ name: m.name, telegram_id: m.telegram_id, role: profileRole, max_accounts: 15, is_active: true });
+          if (error) throw error;
+        }
+
+        // telegram_users — keyed by telegram_id; never downgrade an existing admin.
+        const { data: existing } = await db().from("telegram_users").select("role").eq("telegram_id", m.telegram_id).limit(1);
+        const finalRole = existing?.[0]?.role === "admin" ? "admin" : userRole;
+        const { error: userErr } = await db().from("telegram_users").upsert(
+          {
+            telegram_id: m.telegram_id,
+            username: m.telegram_username || null,
+            first_name: m.name,
+            role: finalRole,
+            is_active: true,
+            added_by: "teamflow-sync",
+          },
+          { onConflict: "telegram_id" }
+        );
+        if (userErr) throw userErr;
+        synced.push(m.name);
+      } catch (e: any) {
+        errors.push(`${m.name}: ${e?.message || String(e)}`);
+      }
+    }
+
+    const lines = ["🔄 *TeamFlow → Reel Lab sync*", ""];
+    lines.push(`✅ Synced: ${synced.length}${synced.length ? ` (${synced.join(", ")})` : ""}`);
+    if (skipped.length) lines.push(`⚠️ Skipped (no Telegram ID): ${skipped.join(", ")}`);
+    if (errors.length) lines.push(`❌ Errors:`, ...errors.map((e) => `  • ${e}`));
+    return sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown" });
+  } catch (e: any) {
+    return sendMessage(chatId, `❌ Sync failed: ${e?.message || String(e)}`);
+  }
+}
+
 // /schedule <account_handle> — show an account's posting schedule.
 async function cmdSchedule(chatId: number, arg: string) {
   const handle = (arg.split(/\s+/)[0] || "").replace(/^@/, "").trim().toLowerCase();
@@ -1336,6 +1418,8 @@ async function handleMessage(msg: any) {
         return cmdVas(chatId);
       case "/schedule":
         return cmdSchedule(chatId, arg);
+      case "/syncmembers":
+        return cmdSyncMembers(chatId);
       case "/inspire":
         if (arg && looksLikeImport(arg)) return startImportFlow(chatId, arg);
         return sendMessage(chatId, "Send me Instagram reel links or @handles to import (you can include them after /inspire or in a separate message).");

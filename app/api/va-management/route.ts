@@ -58,6 +58,39 @@ export async function GET() {
       };
     });
 
+    // TeamFlow members (tf_members, same shared Supabase) also count as VAs —
+    // merge any not already in va_profiles so the page and the assign dropdown
+    // show them. Run /syncmembers (bot) to materialize them into va_profiles.
+    try {
+      const { data: tfMembers } = await db()
+        .from("tf_members")
+        .select("id, name, telegram_id, status")
+        .eq("status", "active");
+      const existingNames = new Set(rows.map((v: any) => String(v.name || "").toLowerCase()));
+      for (const m of tfMembers || []) {
+        const name = String((m as any).name || "").trim();
+        if (!name || existingNames.has(name.toLowerCase())) continue;
+        existingNames.add(name.toLowerCase());
+        const assigned = acctsByVa[name] || new Set();
+        const posted = postedByVa[name] || new Set();
+        const postedAssigned = [...assigned].filter((h) => posted.has(h));
+        rows.push({
+          id: `tf-${(m as any).id}`,
+          name,
+          telegram_id: (m as any).telegram_id,
+          role: "va",
+          max_accounts: 15,
+          is_active: true,
+          source: "teamflow",
+          account_count: assigned.size,
+          posted_today: postedAssigned.length,
+          not_posted_today: Math.max(0, assigned.size - postedAssigned.length),
+        });
+      }
+    } catch {
+      // tf_members unavailable — show va_profiles only.
+    }
+
     return NextResponse.json({ vas: rows });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || String(e), vas: [] }, { status: 500 });
