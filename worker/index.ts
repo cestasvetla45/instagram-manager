@@ -232,15 +232,22 @@ async function processAccount(handle: string, isOur: boolean): Promise<ProcessRe
 async function pickOurAccount(): Promise<string | null> {
   const cutoff = new Date(Date.now() - OUR_COOLDOWN_MIN * 60 * 1000).toISOString();
   try {
+    // NOTE: two .or() filters on one PostgREST query conflict and return [],
+    // so the cooldown lives in the query and the status filter lives in JS
+    // (our_accounts is ~7 rows).
     const { data } = await db()
       .from(TABLES.ourAccounts)
       .select("handle, active, scrape_status, last_scraped_at")
       .eq("active", true)
-      .or(`scrape_status.is.null,scrape_status.not.in.(${EXCLUDED_SCRAPE_STATUSES.join(",")})`)
       .or(`last_scraped_at.is.null,last_scraped_at.lt.${cutoff}`)
       .order("last_scraped_at", { ascending: true, nullsFirst: true })
-      .limit(1);
-    return data?.[0]?.handle || null;
+      .limit(20);
+    for (const a of data || []) {
+      if (!a.handle) continue;
+      if (a.scrape_status && EXCLUDED_SCRAPE_STATUSES.includes(a.scrape_status)) continue;
+      return a.handle;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -257,12 +264,12 @@ async function pickInspoAccount(): Promise<string | null> {
       .from(TABLES.inspirationAccounts)
       .select("handle, scrape_status, last_scraped_at")
       .or(`last_scraped_at.is.null,last_scraped_at.lt.${cutoff}`)
-      .or(`scrape_status.is.null,scrape_status.not.in.(${EXCLUDED_SCRAPE_STATUSES.join(",")})`)
       .order("last_scraped_at", { ascending: true, nullsFirst: true })
       .limit(25);
 
     for (const a of data || []) {
       if (!a.handle) continue;
+      if (a.scrape_status && EXCLUDED_SCRAPE_STATUSES.includes(a.scrape_status)) continue;
       try {
         const { data: existing } = await db()
           .from(TABLES.inspirationReels)
