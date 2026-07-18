@@ -14,7 +14,9 @@ type TgStatus = {
 
 export default function Overview() {
   const [insp, setInsp] = useState<any[]>([]);
+  const [inspTotal, setInspTotal] = useState(0);
   const [our, setOur] = useState<any[]>([]);
+  const [ourTotal, setOurTotal] = useState(0);
   const [accts, setAccts] = useState<any[]>([]);
   const [ourAccts, setOurAccts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -23,12 +25,16 @@ export default function Overview() {
   useEffect(() => {
     Promise.all([
       fetch("/api/reels?type=inspiration").then((r) => r.json()),
-      fetch("/api/reels?type=our").then((r) => r.json()),
+      // limit=500 covers "our" reels in full so total views / avg ER aren't
+      // skewed by only sampling the top-200-by-views slice.
+      fetch("/api/reels?type=our&limit=500").then((r) => r.json()),
       fetch("/api/accounts?type=inspiration").then((r) => r.json()),
       fetch("/api/accounts?type=our").then((r) => r.json()),
     ]).then(([a, b, c, d]) => {
       setInsp(a.records || []);
+      setInspTotal(a.total ?? (a.records || []).length);
       setOur(b.records || []);
+      setOurTotal(b.total ?? (b.records || []).length);
       setAccts(c.records || []);
       setOurAccts(d.records || []);
       setLoading(false);
@@ -42,6 +48,13 @@ export default function Overview() {
   };
   const totalViews = (recs: any[]) => recs.reduce((s, r) => s + Number(r.fields.Views || 0), 0);
 
+  // Archived accounts (active === false) are excluded from the "our" totals —
+  // otherwise a banned/retired account's reels keep inflating the headline stats.
+  const activeOurHandles = new Set(
+    ourAccts.filter((a) => a.fields.Active !== false).map((a) => String(a.fields.Handle || "").toLowerCase())
+  );
+  const ourActive = our.filter((r) => activeOurHandles.has(String(r.fields["Account Handle"] || "").toLowerCase()));
+
   return (
     <div>
       <h1 className="h1">Overview</h1>
@@ -49,11 +62,11 @@ export default function Overview() {
       <ConfigBanner />
 
       <div className="cards">
-        <div className="card"><div className="k">Inspiration reels</div><div className="v">{insp.length}</div></div>
-        <div className="card"><div className="k">Our reels tracked</div><div className="v">{our.length}</div></div>
-        <div className="card"><div className="k">Accounts watched</div><div className="v">{accts.length + ourAccts.length}</div></div>
-        <div className="card"><div className="k">Our total views</div><div className="v">{fmt(totalViews(our))}</div></div>
-        <div className="card"><div className="k">Our avg ER</div><div className="v">{pct(avgER(our))}</div></div>
+        <div className="card"><div className="k">Inspiration reels</div><div className="v">{fmt(inspTotal)}</div></div>
+        <div className="card"><div className="k">Our reels tracked</div><div className="v">{fmt(ourTotal)}</div></div>
+        <div className="card"><div className="k">Accounts watched</div><div className="v">{accts.length + ourAccts.filter((a) => a.fields.Active !== false).length}</div></div>
+        <div className="card"><div className="k">Our total views</div><div className="v">{fmt(totalViews(ourActive))}</div></div>
+        <div className="card"><div className="k">Our avg ER</div><div className="v">{pct(avgER(ourActive))}</div></div>
       </div>
 
       <div className="panel">
