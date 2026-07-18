@@ -146,31 +146,144 @@ export async function importAccountTopReels(
   return { handle: clean, imported, followers, niche: niche || null, downloaded, categorized };
 }
 
-// Process up to `perCycle` accounts that have NO reels yet (the backlog).
+// ── Backlog selection ───────────────────────────────────────────
+// PREVIOUSLY: backlog membership was computed by pulling EVERY inspiration_reels
+// row (`.select("author_handle").limit(20000)`) into memory and checking which
+// accounts had zero matching rows. That looked safe (20000 >> table size) but
+// PostgREST enforces its own server-side `db-max-rows` cap (default 1000) that
+// silently truncates any response past that, regardless of the client-side
+// `.limit()` you asked for — no error, no warning, just a partial page. Once
+// inspiration_reels grew past ~1000 rows, the "have reels" set only ever saw
+// the first page (in undefined/physical order), so hundreds of accounts that
+// already had reels imported kept reading as "no reels yet" forever — the
+// exact 373-account plateau this was stuck at, reprocessing the same handles
+// (welcometomellyland, jumybear, ...) every pass and re-importing 25 reels
+// each time without the backlog ever shrinking.
+//
+// FIX: stop inferring "already enriched" from a reel-existence join at all.
+// Track it directly on inspiration_accounts.enriched_at, stamped after each
+// processing attempt. Selection is then a plain indexed filter on a handful
+// of accounts — never a table-wide join — so it can't be truncated by a row
+// cap. Accounts are retried only once enriched_at is more than
+// ENRICH_RETRY_DAYS old, which also naturally throttles repeat attempts on
+// accounts that error without being permanently "inaccessible".
+const ENRICH_RETRY_DAYS = 7;
+const EXCLUDED_SCRAPE_STATUSES = ["inaccessible", "archived"];
+
+// Rough classifier for "this handle doesn't resolve on Instagram (deleted /
+// renamed / never existed)" vs. a transient scraper failure. Matches get
+// scrape_status='inaccessible' so they leave the backlog (and every other
+// selection query) permanently instead of being retried every 7 days forever.
+export function looksLikeMissingAccountError(msg: string): boolean {
+  return /does not exist|doesn't exist|not found|no longer exists|user_not_found|cannot be found|invalid user|account.*(suspended|deactivated|deleted)/i.test(
+    String(msg || "")
+  );
+}
+
+async function markInaccessibleIfMissing(handle: string, table: string, err: any): Promise<boolean> {
+  if (!looksLikeMissingAccountError(err?.message || err)) return false;
+  try {
+    await db().from(table).update({ scrape_status: "inaccessible", updated_at: new Date().toISOString() }).eq("handle", handle);
+    console.log(`⚠ ${handle} flagged as inaccessible — account does not resolve`);
+  } catch {}
+  return true;
+}
+
+// Up to `limit` inspiration accounts due for (re-)enrichment, oldest
+// enriched_at first (nulls — never enriched — come first). Excludes
+// permanently-excluded accounts. A single small indexed query, no join.
+async function pickBacklogAccounts(limit: number): Promise<string[]> {
+  const cutoff = new Date(Date.now() - ENRICH_RETRY_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const { data } = await db()
+    .from(TABLES.inspirationAccounts)
+    .select("handle, scrape_status, enriched_at")
+    .or(`enriched_at.is.null,enriched_at.lt.${cutoff}`)
+    .or(`scrape_status.is.null,scrape_status.not.in.(${EXCLUDED_SCRAPE_STATUSES.join(",")})`)
+    .order("enriched_at", { ascending: true, nullsFirst: true })
+    .limit(limit);
+  return (data || []).map((a: any) => a.handle).filter(Boolean);
+}
+
+type BacklogAccountResult = {
+  handle: string;
+  imported: number;
+  empty: boolean;
+  failed: boolean;
+  inaccessible?: boolean;
+  error?: string;
+};
+
+// Process one backlog account end-to-end: import, then stamp enriched_at
+// (success OR failure — a persistently-erroring-but-not-"missing" account
+// should back off for ENRICH_RETRY_DAYS, not be hammered every beat) and
+// scrape_status='ok' on success so it also satisfies the "successful scrape
+// sets scrape_status='ok'" rule everywhere else in the worker.
+async function enrichBacklogAccount(handle: string, n: number): Promise<BacklogAccountResult> {
+  const now = new Date().toISOString();
+  try {
+    const res = await importAccountTopReels(handle, n);
+    await db()
+      .from(TABLES.inspirationAccounts)
+      .update({ enriched_at: now, scrape_status: "ok" })
+      .eq("handle", handle);
+    return { handle, imported: res.imported, empty: !!res.empty, failed: false };
+  } catch (e: any) {
+    const inaccessible = await markInaccessibleIfMissing(handle, TABLES.inspirationAccounts, e);
+    try {
+      await db().from(TABLES.inspirationAccounts).update({ enriched_at: now }).eq("handle", handle);
+    } catch {}
+    return { handle, imported: 0, empty: false, failed: true, inaccessible, error: e?.message || String(e) };
+  }
+}
+
+// Worker scheduler entry point: pick and process EXACTLY ONE backlog
+// account per call (the P3 lane of the one-account-per-beat scheduler).
+export async function enrichOneBacklogAccount(count?: number): Promise<{
+  handle: string | null;
+  processed: number;
+  imported: number;
+  skipped: boolean;
+  failed?: boolean;
+  inaccessible?: boolean;
+  error?: string;
+}> {
+  const n = count ?? Number(process.env.ENRICH_REELS_PER_ACCOUNT || 25);
+  const [handle] = await pickBacklogAccounts(1);
+  if (!handle) return { handle: null, processed: 0, imported: 0, skipped: true };
+  const r = await enrichBacklogAccount(handle, n);
+  return {
+    handle: r.handle,
+    processed: 1,
+    imported: r.imported,
+    skipped: false,
+    failed: r.failed,
+    inaccessible: r.inaccessible,
+    error: r.error,
+  };
+}
+
+// Batch variant — kept for the /api/enrich route and the legacy full-cycle
+// refresh in lib/refresh.ts. Same fixed selection as enrichOneBacklogAccount,
+// just looped `perCycle` times per call.
 export async function enrichBacklog(perCycle?: number, count?: number) {
   const per = perCycle ?? Number(process.env.ENRICH_PER_CYCLE || 8);
   const n = count ?? Number(process.env.ENRICH_REELS_PER_ACCOUNT || 25);
 
-  const { data: accts } = await db().from(TABLES.inspirationAccounts).select("handle").limit(5000);
-  const { data: haveReels } = await db().from(TABLES.inspirationReels).select("author_handle").limit(20000);
-  const have = new Set((haveReels || []).map((r: any) => (r.author_handle || "").toLowerCase()).filter(Boolean));
-  const backlog = (accts || []).map((a: any) => a.handle).filter((h: string) => h && !have.has(h.toLowerCase()));
-
-  const toProcess = backlog.slice(0, per);
-  console.log(`[enrichBacklog] backlog=${backlog.length}, processing ${toProcess.length} accounts`);
+  const toProcess = await pickBacklogAccounts(per);
+  console.log(`[enrichBacklog] processing ${toProcess.length} accounts (enriched_at-driven selection)`);
   let processed = 0, imported = 0, failed = 0, empty = 0;
   for (const [i, h] of toProcess.entries()) {
     console.log(`[enrichBacklog] (${i + 1}/${toProcess.length}) processing @${h}`);
-    try {
-      const res = await importAccountTopReels(h, n);
-      processed++;
-      imported += res.imported;
-      if (res.empty) empty++;
-      console.log(`[enrichBacklog] (${i + 1}/${toProcess.length}) done @${h} — imported ${res.imported}`);
-    } catch (e: any) {
-      failed++;
-      console.log(`[enrichBacklog] (${i + 1}/${toProcess.length}) failed @${h} — ${e?.message || e}`);
-    }
+    const r = await enrichBacklogAccount(h, n);
+    processed++;
+    imported += r.imported;
+    if (r.empty) empty++;
+    if (r.failed) failed++;
+    console.log(
+      `[enrichBacklog] (${i + 1}/${toProcess.length}) ${r.failed ? "failed" : "done"} @${h} — imported ${r.imported}${
+        r.error ? ` (${r.error})` : ""
+      }`
+    );
   }
-  return { backlogTotal: backlog.length, processed, imported, empty, failed, remaining: Math.max(0, backlog.length - processed) };
+  return { processed, imported, empty, failed };
 }

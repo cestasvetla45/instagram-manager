@@ -87,6 +87,8 @@ export function reelToFields(r: any, isOur: boolean) {
       "Is Viral": r.is_viral,
       "Viral Score": r.viral_score != null ? Number(r.viral_score) : null,
       "Trend Velocity": r.trend_velocity != null ? Number(r.trend_velocity) : null,
+      "Is Winner": r.is_winner ?? false,
+      "Note": r.note || null,
     },
   };
 }

@@ -40,6 +40,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "📋 Accounts",
     items: [
+      { href: "/accounts", label: "Our Accounts" },
       { href: "/our-reels", label: "Our Reels" },
       { href: "/performance", label: "Reel Performance" },
       { href: "/va-management", label: "VA Management" },

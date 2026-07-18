@@ -5,33 +5,50 @@ import { saveReel } from "./save";
 
 const nowISO = () => new Date().toISOString();
 
+// Per-account new-post detection — the unit the worker's one-account-per-beat
+// scheduler calls right after refreshing an OUR account (P1 lane), so newly
+// posted reels are picked up within the same beat instead of waiting for a
+// separate all-accounts sweep.
+export async function detectAndAddNewPostsForAccount(handle: string): Promise<{ handle: string; added: number }> {
+  const clean = String(handle || "").trim();
+  if (!clean) return { handle: clean, added: 0 };
+
+  const { data: reels } = await db()
+    .from(TABLES.ourReels)
+    .select("shortcode")
+    .ilike("account_handle", clean);
+  const known = new Set((reels || []).map((r: any) => String(r.shortcode || "").toLowerCase()));
+
+  let added = 0;
+  try {
+    const recent = await scrapeUserReels(clean, 500);
+    for (const reel of recent) {
+      const sc = (reel.shortcode || "").toLowerCase();
+      if (!sc || known.has(sc)) continue;
+      try {
+        await saveReel(reel.url, "our");
+        known.add(sc);
+        added++;
+      } catch {
+        /* skip */
+      }
+    }
+  } catch {
+    /* skip account */
+  }
+  return { handle: clean, added };
+}
+
+// All-accounts sweep — kept for compat with lib/refresh.ts's legacy full
+// cycle. Just detectAndAddNewPostsForAccount() looped over every our_account.
 export async function detectAndAddNewPosts() {
   const { data: accounts } = await db().from(TABLES.ourAccounts).select("handle");
-  const { data: reels } = await db().from(TABLES.ourReels).select("shortcode");
-  const known = new Set((reels || []).map((r: any) => String(r.shortcode || "").toLowerCase()));
   const out: { handle: string; added: number }[] = [];
 
   for (const acc of accounts || []) {
     const handle = String(acc.handle || "");
     if (!handle) continue;
-    let added = 0;
-    try {
-      const recent = await scrapeUserReels(handle, 500);
-      for (const reel of recent) {
-        const sc = (reel.shortcode || "").toLowerCase();
-        if (!sc || known.has(sc)) continue;
-        try {
-          await saveReel(reel.url, "our");
-          known.add(sc);
-          added++;
-        } catch {
-          /* skip */
-        }
-      }
-    } catch {
-      /* skip account */
-    }
-    out.push({ handle, added });
+    out.push(await detectAndAddNewPostsForAccount(handle));
   }
   return out;
 }

@@ -1,9 +1,9 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import ReelCard from "../components/ReelCard";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import ConfigBanner from "../components/ConfigBanner";
 import NicheCombo from "../components/NicheCombo";
-import { fmt } from "../components/util";
+import Toast, { useToast } from "../components/Toast";
+import { fmt, attachUrl } from "../components/util";
 
 type Tab = "accounts" | "reels" | "stats";
 const PAGE_SIZE = 50;
@@ -25,6 +25,7 @@ function timeAgo(iso?: string | null) {
 export default function InspirationAccountsPage() {
   const [tab, setTab] = useState<Tab>("accounts");
   const [niches, setNiches] = useState<string[]>([]);
+  const { toasts, push } = useToast();
 
   const loadNiches = useCallback(() => {
     fetch("/api/niches")
@@ -46,9 +47,10 @@ export default function InspirationAccountsPage() {
         <button className={tab === "stats" ? "" : "secondary"} onClick={() => setTab("stats")}>📊 Stats Overview</button>
       </div>
 
-      {tab === "accounts" && <AccountsTab niches={niches} onNichesChange={loadNiches} />}
-      {tab === "reels" && <ReelsTab niches={niches} onNichesChange={loadNiches} />}
+      {tab === "accounts" && <AccountsTab niches={niches} onNichesChange={loadNiches} push={push} />}
+      {tab === "reels" && <ReelsTab niches={niches} onNichesChange={loadNiches} push={push} />}
       {tab === "stats" && <StatsTab />}
+      <Toast toasts={toasts} />
     </div>
   );
 }
@@ -56,21 +58,23 @@ export default function InspirationAccountsPage() {
 // ─────────────────────────────────────────────────────────────
 //  TAB 1 — Accounts
 // ─────────────────────────────────────────────────────────────
-function AccountsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange: () => void }) {
+function AccountsTab({ niches, onNichesChange, push }: { niches: string[]; onNichesChange: () => void; push: (m: string, k?: "ok" | "error") => void }) {
   const [rows, setRows] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [niche, setNiche] = useState("ALL");
+  const [status, setStatus] = useState("active"); // all | active | archived
   const [sort, setSort] = useState("reels");
   const [page, setPage] = useState(1);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [showAdd, setShowAdd] = useState(false);
   const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState<Set<string>>(new Set());
 
   const load = useCallback(() => {
     setLoading(true);
-    const p = new URLSearchParams({ search, niche, sort, page: String(page), limit: String(PAGE_SIZE) });
+    const p = new URLSearchParams({ search, niche, sort, status, page: String(page), limit: String(PAGE_SIZE) });
     fetch(`/api/inspiration-accounts?${p}`)
       .then((r) => r.json())
       .then((j) => {
@@ -80,11 +84,15 @@ function AccountsTab({ niches, onNichesChange }: { niches: string[]; onNichesCha
       })
       .catch((e) => setMsg(String(e)))
       .finally(() => setLoading(false));
-  }, [search, niche, sort, page]);
+  }, [search, niche, sort, status, page]);
 
   useEffect(() => { load(); }, [load]);
   // reset to page 1 when filters change
-  useEffect(() => { setPage(1); }, [search, niche, sort]);
+  useEffect(() => { setPage(1); }, [search, niche, sort, status]);
+
+  function setRowBusy(h: string, on: boolean) {
+    setBusy((prev) => { const n = new Set(prev); on ? n.add(h) : n.delete(h); return n; });
+  }
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const allSel = rows.length > 0 && rows.every((r) => sel.has(r.handle));
@@ -124,6 +132,79 @@ function AccountsTab({ niches, onNichesChange }: { niches: string[]; onNichesCha
     load();
   }
 
+  async function enrichOne(handle: string) {
+    setRowBusy(handle, true);
+    try {
+      const j = await fetch("/api/inspiration-accounts/enrich", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ handle }),
+      }).then((r) => r.json());
+      if (j.error) throw new Error(j.error);
+      push(`@${handle} enriched — ${j.imported || 0} reel(s) imported.`, "ok");
+      load();
+    } catch (e: any) {
+      push(`Enrich failed for @${handle}: ${e?.message || e}`, "error");
+    } finally {
+      setRowBusy(handle, false);
+    }
+  }
+
+  async function toggleArchive(a: any) {
+    const archived = a.scrape_status === "archived";
+    const action = archived ? "unarchive" : "archive";
+    const prev = rows;
+    setRows((rs) => rs.map((r) => (r.handle === a.handle ? { ...r, scrape_status: archived ? null : "archived" } : r)));
+    try {
+      const j = await fetch("/api/inspiration-accounts", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ handle: a.handle, action }),
+      }).then((r) => r.json());
+      if (j.error) throw new Error(j.error);
+      push(`@${a.handle} ${action === "archive" ? "archived" : "unarchived"}.`, "ok");
+      if (status !== "all") load();
+    } catch (e: any) {
+      setRows(prev);
+      push(`Failed: ${e?.message || e}`, "error");
+    }
+  }
+
+  async function archiveSelected() {
+    const handles = [...sel];
+    if (!handles.length) return;
+    try {
+      const j = await fetch("/api/inspiration-accounts", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ handles, action: "archive" }),
+      }).then((r) => r.json());
+      if (j.error) throw new Error(j.error);
+      push(`Archived ${handles.length} account(s).`, "ok");
+      setSel(new Set());
+      load();
+    } catch (e: any) {
+      push(`Bulk archive failed: ${e?.message || e}`, "error");
+    }
+  }
+
+  async function editNiche(handle: string, value: string) {
+    const prev = rows;
+    setRows((rs) => rs.map((r) => (r.handle === handle ? { ...r, niche: value } : r)));
+    try {
+      const j = await fetch("/api/inspiration-accounts", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ handle, field: "niche", value }),
+      }).then((r) => r.json());
+      if (j.error) throw new Error(j.error);
+      onNichesChange();
+    } catch (e: any) {
+      setRows(prev);
+      push(`Failed to update niche: ${e?.message || e}`, "error");
+    }
+  }
+
   return (
     <div>
       <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
@@ -137,6 +218,11 @@ function AccountsTab({ niches, onNichesChange }: { niches: string[]; onNichesCha
           <option value="ALL">All niches</option>
           <option value="UNTAGGED">— untagged —</option>
           {niches.map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="active">Active</option>
+          <option value="archived">Archived</option>
+          <option value="all">All</option>
         </select>
         <select value={sort} onChange={(e) => setSort(e.target.value)}>
           <option value="reels">Sort: Reels</option>
@@ -152,6 +238,7 @@ function AccountsTab({ niches, onNichesChange }: { niches: string[]; onNichesCha
         <div className="row" style={{ gap: 8, alignItems: "center", marginBottom: 10 }}>
           <span className="muted">{sel.size} selected</span>
           <button onClick={deleteSelected} style={{ background: "#c0392b", color: "#fff" }}>Delete Selected</button>
+          <button className="secondary" onClick={archiveSelected}>Archive Selected</button>
           <button className="secondary" onClick={() => setSel(new Set())}>Clear</button>
         </div>
       )}
@@ -174,31 +261,49 @@ function AccountsTab({ niches, onNichesChange }: { niches: string[]; onNichesCha
                 <th style={thR}>Avg Views</th>
                 <th style={thR}>Total Views</th>
                 <th style={th}>Last Scraped</th>
+                <th style={th}>Enriched</th>
                 <th style={th}></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((a) => (
-                <tr key={a.handle} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={td}><input type="checkbox" checked={sel.has(a.handle)} onChange={() => toggle(a.handle)} /></td>
-                  <td style={td}>
-                    <a href={`https://instagram.com/${a.handle}`} target="_blank" rel="noreferrer" style={{ fontWeight: 600 }}>@{a.handle}</a>
-                    {a.is_viral && <span className="badge" style={{ marginLeft: 6, background: "#c0392b", color: "#fff" }}>🔥{a.viral_count}</span>}
-                  </td>
-                  <td style={td}>{a.full_name || <span className="muted">—</span>}</td>
-                  <td style={tdR}>{fmt(a.followers)}</td>
-                  <td style={td}>{a.niche ? <span className="badge">{a.niche}</span> : <span className="muted">—</span>}</td>
-                  <td style={tdR}>{a.reel_count}</td>
-                  <td style={tdR}>{fmt(a.avg_views)}</td>
-                  <td style={tdR}>{fmt(a.total_views)}</td>
-                  <td style={td} className="muted">{timeAgo(a.last_scraped)}</td>
-                  <td style={td}>
-                    <button className="secondary" onClick={() => deleteOne(a.handle)} style={{ color: "#e74c3c", borderColor: "#e74c3c", fontSize: 12, padding: "3px 10px" }}>Delete</button>
-                  </td>
-                </tr>
-              ))}
+              {rows.map((a) => {
+                const archived = a.scrape_status === "archived";
+                const rowBusy = busy.has(a.handle);
+                return (
+                  <tr key={a.handle} style={{ borderTop: "1px solid var(--border)", opacity: archived ? 0.6 : 1 }}>
+                    <td style={td}><input type="checkbox" checked={sel.has(a.handle)} onChange={() => toggle(a.handle)} /></td>
+                    <td style={td}>
+                      <a href={`https://instagram.com/${a.handle}`} target="_blank" rel="noreferrer" style={{ fontWeight: 600 }}>@{a.handle}</a>
+                      {a.is_viral && <span className="badge" style={{ marginLeft: 6, background: "#c0392b", color: "#fff" }}>🔥{a.viral_count}</span>}
+                      {a.scrape_status === "inaccessible" && <span className="badge" style={{ marginLeft: 6, color: "#e74c3c", borderColor: "#e74c3c" }}>inaccessible</span>}
+                      {archived && <span className="badge" style={{ marginLeft: 6 }}>archived</span>}
+                    </td>
+                    <td style={td}>{a.full_name || <span className="muted">—</span>}</td>
+                    <td style={tdR}>{fmt(a.followers)}</td>
+                    <td style={td}>
+                      <InlineNiche value={a.niche} niches={niches} onCommit={(v) => editNiche(a.handle, v)} />
+                    </td>
+                    <td style={tdR}>{a.reel_count}</td>
+                    <td style={tdR}>{fmt(a.avg_views)}</td>
+                    <td style={tdR}>{fmt(a.total_views)}</td>
+                    <td style={td} className="muted">{timeAgo(a.last_scraped)}</td>
+                    <td style={td} className="muted">{timeAgo(a.enriched_at)}</td>
+                    <td style={td}>
+                      <div className="row" style={{ gap: 4, flexWrap: "nowrap" }}>
+                        <button className="secondary" onClick={() => enrichOne(a.handle)} disabled={rowBusy} title="Enrich now" style={{ fontSize: 12, padding: "3px 8px" }}>
+                          {rowBusy ? <span className="spinner" /> : "Enrich"}
+                        </button>
+                        <button className="secondary" onClick={() => toggleArchive(a)} style={{ fontSize: 12, padding: "3px 8px" }}>
+                          {archived ? "Unarchive" : "Archive"}
+                        </button>
+                        <button className="secondary" onClick={() => deleteOne(a.handle)} style={{ color: "#e74c3c", borderColor: "#e74c3c", fontSize: 12, padding: "3px 8px" }}>Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
               {!rows.length && (
-                <tr><td colSpan={10} style={{ padding: 24, textAlign: "center" }} className="muted">No accounts found.</td></tr>
+                <tr><td colSpan={11} style={{ padding: 24, textAlign: "center" }} className="muted">No accounts found.</td></tr>
               )}
             </tbody>
           </table>
@@ -209,6 +314,49 @@ function AccountsTab({ niches, onNichesChange }: { niches: string[]; onNichesCha
 
       {showAdd && <AddAccountModal niches={niches} onNichesChange={onNichesChange} onClose={() => setShowAdd(false)} onDone={load} />}
     </div>
+  );
+}
+
+// Click-to-edit niche cell for the accounts table (datalist-backed free text).
+function InlineNiche({ value, niches, onCommit }: { value: string; niches: string[]; onCommit: (v: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || "");
+  const listId = useId();
+
+  useEffect(() => { if (!editing) setDraft(value || ""); }, [value, editing]);
+
+  if (!editing) {
+    return (
+      <span onClick={() => setEditing(true)} style={{ cursor: "pointer" }} title="Click to edit niche">
+        {value ? <span className="badge">{value}</span> : <span className="muted">—</span>}
+      </span>
+    );
+  }
+
+  function commit() {
+    setEditing(false);
+    if (draft.trim() !== (value || "")) onCommit(draft.trim());
+  }
+
+  return (
+    <>
+      <input
+        autoFocus
+        list={listId}
+        value={draft}
+        placeholder="niche"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          if (e.key === "Escape") { setDraft(value || ""); setEditing(false); }
+        }}
+        style={{ fontSize: 12, padding: "3px 6px", width: 120 }}
+      />
+      <datalist id={listId}>
+        {niches.map((n) => <option key={n} value={n} />)}
+      </datalist>
+    </>
   );
 }
 
@@ -278,7 +426,7 @@ function AddAccountModal({ niches, onNichesChange, onClose, onDone }: { niches: 
 // ─────────────────────────────────────────────────────────────
 //  TAB 2 — Reels
 // ─────────────────────────────────────────────────────────────
-function ReelsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange: () => void }) {
+function ReelsTab({ niches, onNichesChange, push }: { niches: string[]; onNichesChange: () => void; push: (m: string, k?: "ok" | "error") => void }) {
   const [reels, setReels] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -287,6 +435,10 @@ function ReelsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange
   const [niche, setNiche] = useState("ALL");
   const [tray, setTray] = useState("ALL");
   const [viral, setViral] = useState(false);
+  const [winnersOnly, setWinnersOnly] = useState(false);
+  const [minViews, setMinViews] = useState<number>(0);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [sort, setSort] = useState("views");
   const [page, setPage] = useState(1);
   const [sel, setSel] = useState<Set<string>>(new Set());
@@ -302,6 +454,10 @@ function ReelsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange
     if (search) p.set("search", search);
     if (handle) p.set("handle", handle);
     if (viral) p.set("viral", "true");
+    if (winnersOnly) p.set("winners", "true");
+    if (minViews > 0) p.set("minViews", String(minViews));
+    if (dateFrom) p.set("from", dateFrom);
+    if (dateTo) p.set("to", dateTo);
     fetch(`/api/inspiration-reels/manage?${p}`)
       .then((r) => r.json())
       .then((j) => {
@@ -311,10 +467,42 @@ function ReelsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange
       })
       .catch((e) => setMsg(String(e)))
       .finally(() => setLoading(false));
-  }, [search, handle, niche, tray, viral, sort, page]);
+  }, [search, handle, niche, tray, viral, winnersOnly, minViews, dateFrom, dateTo, sort, page]);
 
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { setPage(1); }, [search, handle, niche, tray, viral, sort]);
+  useEffect(() => { setPage(1); }, [search, handle, niche, tray, viral, winnersOnly, minViews, dateFrom, dateTo, sort]);
+
+  async function toggleWinner(url: string, next: boolean) {
+    setReels((prev) => prev.map((r) => (r.fields?.["Reel URL"] === url ? { ...r, fields: { ...r.fields, "Is Winner": next } } : r)));
+    try {
+      const j = await fetch("/api/inspiration-reels/manage", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reel_url: url, is_winner: next }),
+      }).then((r) => r.json());
+      if (j.error) throw new Error(j.error);
+    } catch (e: any) {
+      setReels((prev) => prev.map((r) => (r.fields?.["Reel URL"] === url ? { ...r, fields: { ...r.fields, "Is Winner": !next } } : r)));
+      push(`Failed to update winner flag: ${e?.message || e}`, "error");
+    }
+  }
+
+  async function saveNote(url: string, note: string) {
+    const prevReels = reels;
+    setReels((prev) => prev.map((r) => (r.fields?.["Reel URL"] === url ? { ...r, fields: { ...r.fields, Note: note } } : r)));
+    try {
+      const j = await fetch("/api/inspiration-reels/manage", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reel_url: url, note }),
+      }).then((r) => r.json());
+      if (j.error) throw new Error(j.error);
+      push("Note saved.", "ok");
+    } catch (e: any) {
+      setReels(prevReels);
+      push(`Failed to save note: ${e?.message || e}`, "error");
+    }
+  }
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -411,7 +599,7 @@ function ReelsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange
 
   return (
     <div>
-      <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+      <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
         <input placeholder="🔍 Search caption/handle…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ minWidth: 200 }} />
         <input placeholder="handle" value={handle} onChange={(e) => setHandle(e.target.value)} style={{ width: 140 }} />
         <select value={niche} onChange={(e) => setNiche(e.target.value)}>
@@ -427,10 +615,8 @@ function ReelsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange
           <option value="views">Sort: Views</option>
           <option value="recent">Sort: Recent</option>
           <option value="score">Sort: Score</option>
+          <option value="viral">Sort: Viral Score</option>
         </select>
-        <label className="row" style={{ gap: 4, alignItems: "center" }}>
-          <input type="checkbox" checked={viral} onChange={(e) => setViral(e.target.checked)} /> viral only
-        </label>
         <button
           className="secondary"
           onClick={fixThumbnails}
@@ -440,6 +626,39 @@ function ReelsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange
           {fixing ? <><span className="spinner" /> Fixing thumbnails…</> : `🖼 Fix Thumbnails${fixRemaining ? ` (${fixRemaining.toLocaleString()})` : ""}`}
         </button>
         <div style={{ marginLeft: "auto" }} className="muted">{total.toLocaleString()} reels</div>
+      </div>
+
+      <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+        <label className="row" style={{ gap: 4, alignItems: "center" }}>
+          <input type="checkbox" checked={viral} onChange={(e) => setViral(e.target.checked)} /> viral only
+        </label>
+        <button
+          className={winnersOnly ? "" : "secondary"}
+          onClick={() => setWinnersOnly((w) => !w)}
+          title="Quick view: winners only"
+        >
+          ⭐ Winners
+        </button>
+        <input
+          type="number"
+          placeholder="min views"
+          value={minViews || ""}
+          onChange={(e) => setMinViews(Number(e.target.value) || 0)}
+          style={{ width: 110 }}
+        />
+        <span className="muted" style={{ fontSize: 12 }}>Posted:</span>
+        <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} style={{ width: 140 }} />
+        <span className="muted">–</span>
+        <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} style={{ width: 140 }} />
+        {(viral || winnersOnly || minViews > 0 || dateFrom || dateTo) && (
+          <button
+            className="secondary"
+            onClick={() => { setViral(false); setWinnersOnly(false); setMinViews(0); setDateFrom(""); setDateTo(""); }}
+            style={{ fontSize: 12 }}
+          >
+            Clear filters
+          </button>
+        )}
       </div>
 
       {sel.size > 0 && (
@@ -474,12 +693,14 @@ function ReelsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange
             const url = rec.fields?.["Reel URL"];
             const checked = sel.has(url);
             return (
-              <div key={rec.id || url} style={{ position: "relative", outline: checked ? "2px solid var(--accent)" : "none", borderRadius: 12 }}>
-                <label style={{ position: "absolute", top: 10, left: 10, zIndex: 5, background: "rgba(0,0,0,.55)", borderRadius: 6, padding: "2px 5px", cursor: "pointer" }}>
-                  <input type="checkbox" checked={checked} onChange={() => toggle(url)} />
-                </label>
-                <ReelCard rec={rec} />
-              </div>
+              <PowerReelCard
+                key={rec.id || url}
+                rec={rec}
+                selected={checked}
+                onToggleSelect={() => toggle(url)}
+                onToggleWinner={toggleWinner}
+                onSaveNote={saveNote}
+              />
             );
           })}
           {!reels.length && <div className="muted" style={{ padding: 24 }}>No reels found.</div>}
@@ -487,6 +708,103 @@ function ReelsTab({ niches, onNichesChange }: { niches: string[]; onNichesChange
       )}
 
       <Pager page={page} pages={pages} onPage={setPage} />
+    </div>
+  );
+}
+
+// Power-grid reel card — thumbnail + multi-select + star (is_winner) toggle +
+// inline note popover, on top of the same views/likes/viral stats ReelCard
+// shows. Built standalone (not extending ReelCard) so the other pages that
+// reuse ReelCard aren't affected by this tab's extra affordances.
+function PowerReelCard({
+  rec,
+  selected,
+  onToggleSelect,
+  onToggleWinner,
+  onSaveNote,
+}: {
+  rec: any;
+  selected: boolean;
+  onToggleSelect: () => void;
+  onToggleWinner: (url: string, next: boolean) => void;
+  onSaveNote: (url: string, note: string) => void;
+}) {
+  const f = rec.fields || {};
+  const url = f["Reel URL"];
+  const thumb = attachUrl(f.Thumbnail);
+  const isWinner = !!f["Is Winner"];
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [noteDraft, setNoteDraft] = useState(f.Note || "");
+
+  return (
+    <div className="reel" style={{ position: "relative", outline: selected ? "2px solid var(--accent)" : "none" }}>
+      <label style={{ position: "absolute", top: 8, left: 8, zIndex: 6, background: "rgba(0,0,0,.55)", borderRadius: 6, padding: "2px 5px", cursor: "pointer" }}>
+        <input type="checkbox" checked={selected} onChange={onToggleSelect} />
+      </label>
+      <button
+        onClick={() => onToggleWinner(url, !isWinner)}
+        title={isWinner ? "Winner — click to unmark" : "Mark as winner"}
+        style={{
+          position: "absolute", top: 8, right: 8, zIndex: 6,
+          background: "rgba(0,0,0,.55)", border: "none", borderRadius: 6,
+          padding: "2px 8px", fontSize: 16, lineHeight: "20px", cursor: "pointer",
+          color: isWinner ? "#f1c40f" : "#fff",
+        }}
+      >
+        {isWinner ? "★" : "☆"}
+      </button>
+      <div style={{ position: "relative" }}>
+        {thumb ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img className="thumb" src={thumb} alt="" loading="lazy" />
+        ) : (
+          <div className="thumb placeholder">no thumbnail</div>
+        )}
+        {f["Is Viral"] && (
+          <span style={{ position: "absolute", bottom: 8, left: 8, background: "#c0392b", color: "#fff", fontSize: 11, padding: "2px 7px", borderRadius: 6 }}>
+            🔥 viral
+          </span>
+        )}
+      </div>
+      <div className="body">
+        <div className="handle">@{f["Author Handle"] || "unknown"}</div>
+        <div className="row" style={{ gap: 6, margin: "4px 0", flexWrap: "wrap" }}>
+          {f.Niche ? <span className="badge">{f.Niche}</span> : null}
+          {f.Tray ? <span className="badge" style={{ background: "var(--panel-2)" }}>{f.Tray}</span> : null}
+        </div>
+        <div className="stats">
+          <span><b>{fmt(f.Views)}</b> views</span>
+          <span>{fmt(f.Likes)} likes</span>
+          <span>{fmt(f.Comments)} cmts</span>
+          {f["Viral Score"] ? <span>⚡ {Number(f["Viral Score"]).toFixed(1)}</span> : null}
+        </div>
+        {noteOpen ? (
+          <div style={{ marginTop: 6 }}>
+            <textarea
+              value={noteDraft}
+              onChange={(e) => setNoteDraft(e.target.value)}
+              placeholder="Note…"
+              autoFocus
+              style={{ width: "100%", minHeight: 50, fontSize: 12 }}
+            />
+            <div className="row" style={{ gap: 6, marginTop: 4 }}>
+              <button style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { onSaveNote(url, noteDraft); setNoteOpen(false); }}>Save</button>
+              <button className="secondary" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setNoteDraft(f.Note || ""); setNoteOpen(false); }}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <button className="secondary" onClick={() => setNoteOpen(true)} style={{ fontSize: 11, padding: "3px 8px", marginTop: 6 }}>
+            {f.Note ? "📝 Note" : "+ Note"}
+          </button>
+        )}
+      </div>
+      <div className="actions">
+        {url && (
+          <a className="secondary" href={url} target="_blank" rel="noreferrer" style={{ border: "1px solid var(--border)", borderRadius: 8 }}>
+            Open
+          </a>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,42 +1,72 @@
-// Railway background worker — continuous processing with per-account cooldown.
-// Instead of one big batch every 60 min, it runs constantly:
-// - Picks the next accounts that haven't been refreshed in the last hour
-// - Scrapes their reels, updates stats, ingests newly-discovered reels
-// - Flags reels crossing the viral threshold as they're ingested
-// - Never hits the same account more than once per hour (last_scraped_at)
-// - 150ms rate limit between API calls (built into rocksolid.ts)
-// - Persists cycle + API stats to Postgres so the admin dashboard
-//   (a separate Railway service) can see them.
+// Railway background worker — one-account-per-beat staggered scheduler.
+//
+// Every 30s beat processes EXACTLY ONE account (never a batch), chosen by
+// priority: an overdue OUR account (P1) > an overdue inspiration account that
+// already has reels (P2) > one inspiration-backlog account to enrich (P3).
+// With ~4 active OUR accounts and a 55min cooldown, each lands roughly
+// hourly, one API burst per 30s max — no more back-to-back batches of up to
+// 10 accounts spiking the 2 API keys' RPM.
+//
+// enrichBacklog used to run every 5 batches and BLOCK the loop for ~20 min
+// processing 40 accounts serially inline, starving every stat refresh behind
+// it. Now it's folded into the same one-account-per-beat rotation (P3) — at
+// most one backlog account per beat, same as everything else.
+//
+// Periodic (non-scrape) jobs — viral calc, snapshots, Gemini categorization —
+// are time-based off lastRun timestamps rather than batch-counter modulo, so
+// they can't be starved indefinitely and never block the per-beat scrape for
+// long.
 import { db, TABLES } from "../lib/db";
 import { scrapeUserReels, scrapeReel, getApiStats } from "../lib/rocksolid";
 import { calcViralBatch } from "../lib/viral";
 import { autoCategorizeNew } from "../lib/categorize";
-import { enrichBacklog } from "../lib/discover";
-import { detectAndAddNewPosts, snapshotAccounts } from "../lib/accounts";
+import { enrichOneBacklogAccount, looksLikeMissingAccountError } from "../lib/discover";
+import { detectAndAddNewPostsForAccount, snapshotAccounts } from "../lib/accounts";
 import { inspirationScore } from "../lib/score";
 
-const COOLDOWN_MIN = 60; // Don't refresh the same account more than once per hour
-const BATCH_SIZE = 5; // Process 5 accounts, then do other tasks, then repeat
-const VIRAL_INTERVAL = 10; // Run virality calc every 10 batches
-const BACKLOG_INTERVAL = 5; // Run backlog enrichment every 5 batches
-const SNAPSHOT_INTERVAL = 20; // Run account snapshots every 20 batches
-const CATEGORIZE_INTERVAL = 2; // Kick Gemini categorization every 2 batches (non-blocking)
+const OUR_COOLDOWN_MIN = 55; // P1: our accounts — hourly-ish, slightly under 60 so a slow beat doesn't push it past the hour.
+const INSPO_COOLDOWN_MIN = 60; // P2: inspiration accounts.
+const EXCLUDED_SCRAPE_STATUSES = ["inaccessible", "archived"];
 
-let batchCount = 0;
+const VIRAL_INTERVAL_MS = 10 * 60 * 1000; // every ~10 min
+const SNAPSHOT_INTERVAL_MS = 30 * 60 * 1000; // every ~30 min
+const CATEGORIZE_INTERVAL_MS = 2 * 60 * 1000; // kick every ~2 min (fire-and-forget)
+
+let beatCount = 0;
 let running = false;
 let categorizing = false; // only one Gemini categorization run at a time
+let lastViralAt = 0;
+let lastSnapshotAt = 0;
+let lastCategorizeAt = 0;
 
 type ProcessResult = { refreshed: number; failed: number; ingested: number };
+type Lane = "our" | "inspo" | "enrich" | "idle";
 
 // Bulk-scrape one account and update its reels. For inspiration accounts,
 // reels we've never seen before are ingested so viral content is discovered
 // automatically. Falls back to per-reel scraping when bulk returns nothing.
+// On any successful scrape, scrape_status is stamped 'ok'; on a scrape that
+// resolves to "this account doesn't exist", scrape_status is stamped
+// 'inaccessible' so it's excluded from every future selection query.
 async function processAccount(handle: string, isOur: boolean): Promise<ProcessResult> {
   const table = isOur ? TABLES.ourReels : TABLES.inspirationReels;
+  const acctTable = isOur ? TABLES.ourAccounts : TABLES.inspirationAccounts;
   const handleCol = isOur ? "account_handle" : "author_handle";
   let refreshed = 0;
   let failed = 0;
   let ingested = 0;
+
+  const markOk = async () => {
+    try {
+      await db().from(acctTable).update({ scrape_status: "ok" }).eq("handle", handle);
+    } catch {}
+  };
+  const markInaccessible = async () => {
+    try {
+      await db().from(acctTable).update({ scrape_status: "inaccessible", updated_at: new Date().toISOString() }).eq("handle", handle);
+      console.log(`⚠ ${handle} flagged as inaccessible — API can't scrape it`);
+    } catch {}
+  };
 
   try {
     // Try bulk scrape first (1 API call for all reels)
@@ -81,18 +111,11 @@ async function processAccount(handle: string, isOur: boolean): Promise<ProcessRe
 
       // If ALL per-reel calls failed, flag the account as inaccessible
       if (perReelFailed > 0 && refreshed === 0) {
-        try {
-          await db()
-            .from(isOur ? TABLES.ourAccounts : TABLES.inspirationAccounts)
-            .update({ scrape_status: "inaccessible", updated_at: new Date().toISOString() })
-            .eq("handle", handle);
-          console.log(`⚠ ${handle} flagged as inaccessible — API can't scrape it`);
-        } catch {
-          // ignore — column might not exist yet
-        }
+        await markInaccessible();
         return { refreshed: 0, failed: perReelFailed, ingested: 0 };
       }
       failed += perReelFailed;
+      if (refreshed > 0) await markOk();
     } else {
       // Bulk scrape worked — update known reels, ingest unknown ones.
       const codes = reels.map((r) => r.shortcode).filter(Boolean);
@@ -124,9 +147,9 @@ async function processAccount(handle: string, isOur: boolean): Promise<ProcessRe
       const newUrls: string[] = [];
       for (const r of reels) {
         if (r.shortcode && !known.has(r.shortcode)) {
-          // New reel discovered. Our accounts are ingested by detectAndAddNewPosts
-          // (full per-reel scrape); inspiration reels are ingested straight from
-          // the bulk payload — no extra API calls.
+          // New reel discovered. Our accounts are ingested by
+          // detectAndAddNewPostsForAccount (full per-reel scrape); inspiration
+          // reels are ingested straight from the bulk payload — no extra API calls.
           if (isOur) continue;
           // Same row shape as lib/discover.ts importAccountTopReels, so
           // worker-ingested reels aren't second-class in the library.
@@ -174,6 +197,8 @@ async function processAccount(handle: string, isOur: boolean): Promise<ProcessRe
         refreshed++;
       }
 
+      await markOk();
+
       // Viral check right away on freshly ingested reels so trending
       // content surfaces within one worker cycle, not hours later.
       if (newUrls.length) {
@@ -184,15 +209,18 @@ async function processAccount(handle: string, isOur: boolean): Promise<ProcessRe
         }
       }
     }
-  } catch {
+  } catch (e: any) {
     failed++;
+    if (looksLikeMissingAccountError(e?.message || e)) {
+      await markInaccessible();
+    }
   }
 
   // Stamp the cooldown clock whether or not the scrape succeeded — a failing
   // account shouldn't be retried every 30 seconds.
   try {
     await db()
-      .from(isOur ? TABLES.ourAccounts : TABLES.inspirationAccounts)
+      .from(acctTable)
       .update({ last_scraped_at: new Date().toISOString() })
       .eq("handle", handle);
   } catch {}
@@ -200,53 +228,54 @@ async function processAccount(handle: string, isOur: boolean): Promise<ProcessRe
   return { refreshed, failed, ingested };
 }
 
-async function getNextAccounts(): Promise<{ handle: string; isOur: boolean }[]> {
-  const cutoff = new Date(Date.now() - COOLDOWN_MIN * 60 * 1000).toISOString();
-  const accounts: { handle: string; isOur: boolean }[] = [];
-
-  // Our accounts (only ~7): include the ones past cooldown, skip inaccessible.
+// ── P1: an OUR account (active, not excluded) overdue for a refresh. ──
+async function pickOurAccount(): Promise<string | null> {
+  const cutoff = new Date(Date.now() - OUR_COOLDOWN_MIN * 60 * 1000).toISOString();
   try {
-    const { data: ourAccounts } = await db()
+    const { data } = await db()
       .from(TABLES.ourAccounts)
-      .select("handle, scrape_status, last_scraped_at")
-      .limit(20);
-    for (const a of ourAccounts || []) {
-      if (!a.handle) continue;
-      if (a.scrape_status === "inaccessible") continue;
-      if (a.last_scraped_at && a.last_scraped_at > cutoff) continue; // cooldown
-      accounts.push({ handle: a.handle, isOur: true });
-    }
-  } catch {}
+      .select("handle, active, scrape_status, last_scraped_at")
+      .eq("active", true)
+      .or(`scrape_status.is.null,scrape_status.not.in.(${EXCLUDED_SCRAPE_STATUSES.join(",")})`)
+      .or(`last_scraped_at.is.null,last_scraped_at.lt.${cutoff}`)
+      .order("last_scraped_at", { ascending: true, nullsFirst: true })
+      .limit(1);
+    return data?.[0]?.handle || null;
+  } catch {
+    return null;
+  }
+}
 
-  // Inspiration accounts: least recently scraped first, past cooldown,
-  // skip inaccessible, and only ones that already have reels imported
-  // (the backlog is enrichBacklog's job).
+// ── P2: an inspiration account past cooldown that already has reels. ──
+// Checked one small existence query per candidate (never a table-wide join)
+// so it can't fall into the same "silently truncated by PostgREST's row cap"
+// trap that stalled enrichBacklog (see lib/discover.ts).
+async function pickInspoAccount(): Promise<string | null> {
+  const cutoff = new Date(Date.now() - INSPO_COOLDOWN_MIN * 60 * 1000).toISOString();
   try {
     const { data } = await db()
       .from(TABLES.inspirationAccounts)
       .select("handle, scrape_status, last_scraped_at")
       .or(`last_scraped_at.is.null,last_scraped_at.lt.${cutoff}`)
-      .or("scrape_status.is.null,scrape_status.neq.inaccessible")
+      .or(`scrape_status.is.null,scrape_status.not.in.(${EXCLUDED_SCRAPE_STATUSES.join(",")})`)
       .order("last_scraped_at", { ascending: true, nullsFirst: true })
-      .limit(30);
+      .limit(25);
 
-    const candidates = (data || []).map((a: any) => a.handle).filter(Boolean);
-    if (candidates.length) {
-      const { data: withReels } = await db()
-        .from(TABLES.inspirationReels)
-        .select("author_handle")
-        .in("author_handle", candidates)
-        .limit(2000);
-      const have = new Set((withReels || []).map((r: any) => r.author_handle));
-      for (const h of candidates) {
-        if (!have.has(h)) continue;
-        if (accounts.length >= BATCH_SIZE + 5) break;
-        accounts.push({ handle: h, isOur: false });
-      }
+    for (const a of data || []) {
+      if (!a.handle) continue;
+      try {
+        const { data: existing } = await db()
+          .from(TABLES.inspirationReels)
+          .select("id")
+          .ilike("author_handle", a.handle)
+          .limit(1);
+        if (existing && existing.length) return a.handle;
+      } catch {}
     }
-  } catch {}
-
-  return accounts.slice(0, BATCH_SIZE + 5);
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // Persist cycle + API-call stats so the admin dashboard (separate service)
@@ -265,7 +294,7 @@ async function reportStats(cycle: {
     await db()
       .from("worker_api_stats")
       .upsert({ id: 1, stats: getApiStats(), updated_at: new Date().toISOString() });
-    // Trim to the most recent ~500 cycles, occasionally (not every 30s batch).
+    // Trim to the most recent ~500 cycles, occasionally (not every beat).
     if (cycle.batch_no % 50 === 0) {
       const { data: old } = await db()
         .from("worker_cycles")
@@ -282,6 +311,7 @@ async function reportStats(cycle: {
 // Gemini categorization — runs alongside scraping (different API), guarded so
 // only one run is in flight. Viral reels are prioritized inside
 // autoCategorizeNew; 3 reels per run with a 2s gap keeps rate limits happy.
+// Fire-and-forget: kicked off, never awaited by the beat loop.
 function kickCategorization() {
   if (categorizing) return;
   categorizing = true;
@@ -299,46 +329,68 @@ function kickCategorization() {
     });
 }
 
-async function runBatch() {
+async function runBeat() {
   if (running) return;
   running = true;
-  batchCount++;
+  beatCount++;
   const startedAt = new Date().toISOString();
   const start = Date.now();
 
+  let lane: Lane = "idle";
+  let handle: string | null = null;
+  let refreshed = 0;
+  let failed = 0;
+  let ingested = 0;
+
   try {
-    // 1. Get accounts that need refreshing (haven't been touched in 60 min)
-    const accounts = await getNextAccounts();
+    // ── Priority pick: exactly one account this beat. ──
+    const ourHandle = await pickOurAccount();
+    if (ourHandle) {
+      lane = "our";
+      handle = ourHandle;
+      const r = await processAccount(ourHandle, true);
+      refreshed = r.refreshed;
+      failed = r.failed;
+      ingested = r.ingested;
 
-    let totalRefreshed = 0;
-    let totalFailed = 0;
-    let totalIngested = 0;
-
-    for (const acct of accounts) {
-      const result = await processAccount(acct.handle, acct.isOur);
-      totalRefreshed += result.refreshed;
-      totalFailed += result.failed;
-      totalIngested += result.ingested;
-    }
-
-    // 2. Periodic tasks
-    if (batchCount % BACKLOG_INTERVAL === 0) {
+      // New-post detection for THIS account only — folded into the same beat
+      // so freshly posted reels show up without waiting on a separate sweep.
       try {
-        await enrichBacklog();
+        const np = await detectAndAddNewPostsForAccount(ourHandle);
+        ingested += np.added;
       } catch (e: any) {
-        console.error("enrichBacklog error:", e?.message || e);
+        console.error(`detectAndAddNewPosts(${ourHandle}) error:`, e?.message || e);
+      }
+    } else {
+      const inspoHandle = await pickInspoAccount();
+      if (inspoHandle) {
+        lane = "inspo";
+        handle = inspoHandle;
+        const r = await processAccount(inspoHandle, false);
+        refreshed = r.refreshed;
+        failed = r.failed;
+        ingested = r.ingested;
+      } else {
+        try {
+          const enr = await enrichOneBacklogAccount();
+          if (enr.handle) {
+            lane = "enrich";
+            handle = enr.handle;
+            ingested = enr.imported;
+            if (enr.failed) failed = 1;
+          }
+        } catch (e: any) {
+          console.error("enrichOneBacklogAccount error:", e?.message || e);
+        }
       }
     }
 
-    if (batchCount % SNAPSHOT_INTERVAL === 0) {
-      try {
-        await snapshotAccounts();
-      } catch (e: any) {
-        console.error("snapshotAccounts error:", e?.message || e);
-      }
-    }
-
-    if (batchCount % VIRAL_INTERVAL === 0) {
+    // ── Periodic jobs — time-based off lastRun, never batch-counter modulo,
+    //    so a slow stretch can't starve them indefinitely, and they never
+    //    swallow more than one beat's worth of the loop's time budget. ──
+    const now = Date.now();
+    if (now - lastViralAt >= VIRAL_INTERVAL_MS) {
+      lastViralAt = now;
       try {
         await calcViralBatch({ limit: 100 });
       } catch (e: any) {
@@ -346,37 +398,37 @@ async function runBatch() {
       }
     }
 
-    // 3. Check for new posts from our accounts
-    if (batchCount % BACKLOG_INTERVAL === 0) {
+    if (now - lastSnapshotAt >= SNAPSHOT_INTERVAL_MS) {
+      lastSnapshotAt = now;
       try {
-        await detectAndAddNewPosts();
+        await snapshotAccounts();
       } catch (e: any) {
-        console.error("detectNewPosts error:", e?.message || e);
+        console.error("snapshotAccounts error:", e?.message || e);
       }
     }
 
-    // 4. Gemini categorization — fire-and-forget so the scrape loop stays fast.
-    if (batchCount % CATEGORIZE_INTERVAL === 0) {
-      kickCategorization();
+    if (now - lastCategorizeAt >= CATEGORIZE_INTERVAL_MS) {
+      lastCategorizeAt = now;
+      kickCategorization(); // fire-and-forget
     }
 
     const durationSec = (Date.now() - start) / 1000;
     console.log(
       new Date().toISOString(),
-      `batch #${batchCount} done in ${durationSec.toFixed(1)}s — accounts: ${accounts.length}, refreshed: ${totalRefreshed}, ingested: ${totalIngested}, failed: ${totalFailed}`
+      `beat #${beatCount} [${lane}]${handle ? ` @${handle}` : ""} — ${durationSec.toFixed(1)}s, refreshed: ${refreshed}, ingested: ${ingested}, failed: ${failed}`
     );
 
     await reportStats({
-      batch_no: batchCount,
+      batch_no: beatCount,
       started_at: startedAt,
       duration_sec: Math.round(durationSec * 10) / 10,
-      accounts: accounts.length,
-      refreshed: totalRefreshed,
-      failed: totalFailed,
-      extras: totalIngested ? { ingested: totalIngested } : undefined,
+      accounts: handle ? 1 : 0,
+      refreshed,
+      failed,
+      extras: { lane, handle, ingested },
     });
   } catch (e: any) {
-    console.error("batch error:", e?.message || e);
+    console.error("beat error:", e?.message || e);
   } finally {
     running = false;
   }
@@ -387,11 +439,13 @@ if (!process.env.SUPABASE_URL || !process.env.ROCKSOLID_API_KEY) {
   console.warn("⚠ Worker missing SUPABASE_URL / ROCKSOLID_API_KEY — set them in Railway variables.");
 }
 
-console.log(`▶ worker started — continuous mode, cooldown = ${COOLDOWN_MIN} min, batch = ${BATCH_SIZE} accounts`);
+console.log(
+  `▶ worker started — one-account-per-beat mode, our cooldown = ${OUR_COOLDOWN_MIN}min, inspo cooldown = ${INSPO_COOLDOWN_MIN}min`
+);
 
 // Run immediately, then every 30 seconds
-console.log("▶ starting first batch...");
-runBatch().catch(e => console.error("FATAL batch error:", e?.message || e, e?.stack || ""));
+console.log("▶ starting first beat...");
+runBeat().catch((e) => console.error("FATAL beat error:", e?.message || e, e?.stack || ""));
 setInterval(() => {
-  runBatch().catch(e => console.error("batch error:", e?.message || e));
-}, 30_000); // Check for work every 30 seconds
+  runBeat().catch((e) => console.error("beat error:", e?.message || e));
+}, 30_000); // One account every 30 seconds

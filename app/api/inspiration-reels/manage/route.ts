@@ -5,7 +5,8 @@ export const runtime = "nodejs";
 
 const norm = (h: string) => String(h || "").replace(/^@/, "").trim();
 
-// GET /api/inspiration-reels/manage?page=1&limit=50&handle=&niche=&tray=&viral=&sort=views|recent|score&search=
+// GET /api/inspiration-reels/manage?page=1&limit=50&handle=&niche=&tray=&viral=&sort=views|recent|score|viral&search=
+//   &winners=true  &minViews=  &from=YYYY-MM-DD  &to=YYYY-MM-DD
 export async function GET(req: NextRequest) {
   try {
     const sp = req.nextUrl.searchParams;
@@ -15,6 +16,10 @@ export async function GET(req: NextRequest) {
     const niche = sp.get("niche") || "";
     const tray = sp.get("tray") || "";
     const viral = sp.get("viral");
+    const winners = sp.get("winners");
+    const minViews = Number(sp.get("minViews") || 0);
+    const from = sp.get("from") || "";
+    const to = sp.get("to") || "";
     const sort = sp.get("sort") || "views";
     const search = String(sp.get("search") || "").trim();
 
@@ -27,6 +32,10 @@ export async function GET(req: NextRequest) {
     }
     if (tray && tray !== "ALL") q = q.eq("tray", tray);
     if (viral === "true") q = q.eq("is_viral", true);
+    if (winners === "true") q = q.eq("is_winner", true);
+    if (minViews > 0) q = q.gte("views", minViews);
+    if (from) q = q.gte("posted_at", from);
+    if (to) q = q.lte("posted_at", `${to}T23:59:59`);
     // Strip PostgREST filter meta-chars (`,` `(` `)`) and ilike wildcards so a
     // term like "a,b" or "(x)" can't break the .or() expression → 500.
     const safeSearch = search.replace(/[,()%\\]/g, " ").trim();
@@ -34,6 +43,7 @@ export async function GET(req: NextRequest) {
 
     if (sort === "recent") q = q.order("date_scraped", { ascending: false, nullsFirst: false });
     else if (sort === "score") q = q.order("inspiration_score", { ascending: false, nullsFirst: false });
+    else if (sort === "viral") q = q.order("viral_score", { ascending: false, nullsFirst: false });
     else q = q.order("views", { ascending: false, nullsFirst: false });
 
     const start = (page - 1) * limit;
@@ -49,6 +59,42 @@ export async function GET(req: NextRequest) {
     });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || String(e), reels: [], total: 0 }, { status: 500 });
+  }
+}
+
+// PATCH /api/inspiration-reels/manage
+//   { reel_url, is_winner?, note? }             — single reel
+//   { reel_urls: [...], is_winner?, note? }      — bulk (star toggle / note not typical bulk, but supported)
+export async function PATCH(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const patch: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (body.is_winner !== undefined) patch.is_winner = Boolean(body.is_winner);
+    if (body.note !== undefined) patch.note = body.note == null ? null : String(body.note);
+    if (Object.keys(patch).length <= 1) {
+      return NextResponse.json({ error: "is_winner or note required" }, { status: 400 });
+    }
+
+    if (Array.isArray(body.reel_urls) && body.reel_urls.length) {
+      let updated = 0;
+      const CHUNK = 200;
+      const urls: string[] = body.reel_urls.filter(Boolean);
+      for (let i = 0; i < urls.length; i += CHUNK) {
+        const chunk = urls.slice(i, i + CHUNK);
+        const { data, error } = await db().from(TABLES.inspirationReels).update(patch).in("reel_url", chunk).select("id");
+        if (error) throw error;
+        updated += data?.length || 0;
+      }
+      return NextResponse.json({ updated });
+    }
+
+    const url = String(body.reel_url || "").trim();
+    if (!url) return NextResponse.json({ error: "reel_url or reel_urls required" }, { status: 400 });
+    const { data, error } = await db().from(TABLES.inspirationReels).update(patch).eq("reel_url", url).select("id");
+    if (error) throw error;
+    return NextResponse.json({ updated: data?.length || 0 });
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
   }
 }
 

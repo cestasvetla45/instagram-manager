@@ -40,6 +40,7 @@ async function reelStatsByHandle() {
 }
 
 // GET /api/inspiration-accounts?search=&niche=&sort=reels|views|followers|recent&page=1&limit=50
+//   &status=all|active|archived  (default "all" — unchanged behavior)
 export async function GET(req: NextRequest) {
   try {
     const sp = req.nextUrl.searchParams;
@@ -47,6 +48,7 @@ export async function GET(req: NextRequest) {
     const searchRaw = String(sp.get("search") || "").trim().toLowerCase();
     const niche = sp.get("niche") || "";
     const sort = sp.get("sort") || "reels";
+    const status = sp.get("status") || "all";
     const page = Math.max(1, Number(sp.get("page") || 1));
     const limit = Math.min(200, Math.max(1, Number(sp.get("limit") || 50)));
 
@@ -55,6 +57,8 @@ export async function GET(req: NextRequest) {
       if (niche === "UNTAGGED") q = q.or("niche.is.null,niche.eq.");
       else q = q.ilike("niche", niche);
     }
+    if (status === "archived") q = q.eq("scrape_status", "archived");
+    else if (status === "active") q = q.or("scrape_status.is.null,scrape_status.neq.archived");
     const { data: accounts, error } = await q;
     if (error) throw error;
 
@@ -74,6 +78,9 @@ export async function GET(req: NextRequest) {
         viral_count: s.viral,
         is_viral: s.viral > 0,
         last_scraped: s.last_scraped || a.updated_at || a.date_added || null,
+        scrape_status: a.scrape_status || null,
+        enriched_at: a.enriched_at || null,
+        last_scraped_at: a.last_scraped_at || null,
       };
     });
 
@@ -136,6 +143,37 @@ export async function POST(req: NextRequest) {
     }
     await db().from(TABLES.inspirationAccounts).insert(row);
     return NextResponse.json({ ok: true, created: true, account: row });
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
+  }
+}
+
+// PATCH /api/inspiration-accounts
+//   { handle | handles: [...], action: "archive" | "unarchive" }
+//   { handle | handles: [...], field: "niche", value }
+export async function PATCH(req: NextRequest) {
+  try {
+    const b = await req.json();
+    const handles: string[] = Array.isArray(b.handles)
+      ? b.handles.map(norm).filter(Boolean)
+      : b.handle
+      ? [norm(b.handle)]
+      : [];
+    if (!handles.length) return NextResponse.json({ error: "handle or handles required" }, { status: 400 });
+
+    const patch: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (b.action === "archive") patch.scrape_status = "archived";
+    else if (b.action === "unarchive") patch.scrape_status = null;
+    else if (b.field === "niche") patch.niche = b.value != null && String(b.value).trim() !== "" ? String(b.value).trim() : null;
+    else return NextResponse.json({ error: "action or field required" }, { status: 400 });
+
+    let updated = 0;
+    for (const h of handles) {
+      const { data, error } = await db().from(TABLES.inspirationAccounts).update(patch).ilike("handle", h).select("id");
+      if (error) throw error;
+      updated += data?.length || 0;
+    }
+    return NextResponse.json({ ok: true, updated });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
   }
