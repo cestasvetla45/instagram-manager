@@ -12,7 +12,9 @@ export default function TopReels() {
 
   useEffect(() => {
     Promise.all([
-      fetch("/api/reels?type=our").then((r) => r.json()),
+      // limit=500 covers all "our" reels (well under the API's max) so per-account
+      // totals aren't silently undercounted by the default 200-row API limit.
+      fetch("/api/reels?type=our&limit=500").then((r) => r.json()),
       fetch("/api/accounts?type=our").then((r) => r.json()),
     ]).then(([r, a]) => {
       setReels(r.records || []);
@@ -28,12 +30,19 @@ export default function TopReels() {
       if (!h) continue;
       (byHandle[h] = byHandle[h] || []).push(r);
     }
+    // Archived accounts (active === false) are dropped from this "current
+    // roster" view entirely — including from the fallback below.
+    const archived = new Set(
+      accts.filter((a) => a.fields.Active === false).map((a) => String(a.fields.Handle || "").toLowerCase())
+    );
     // order accounts by their total views desc
     const order = accts
+      .filter((a) => a.fields.Active !== false)
       .map((a) => String(a.fields.Handle || "").toLowerCase())
       .filter((h) => byHandle[h]);
-    // include any handles present in reels but not in accounts list
-    for (const h of Object.keys(byHandle)) if (!order.includes(h)) order.push(h);
+    // include any handles present in reels but not in the accounts list
+    // (unless they belong to an archived account)
+    for (const h of Object.keys(byHandle)) if (!order.includes(h) && !archived.has(h)) order.push(h);
 
     return order.map((h) => {
       const list = [...byHandle[h]].sort(

@@ -28,10 +28,17 @@ export default function Growth() {
     });
   }, []);
 
+  // Archived accounts (active === false) are excluded from the roster/combined
+  // totals — they're no longer part of the active growth story.
   const handles = useMemo(
-    () => accts.map((a) => String(a.fields.Handle || "")).filter(Boolean),
+    () =>
+      accts
+        .filter((a) => a.fields.Active !== false)
+        .map((a) => String(a.fields.Handle || ""))
+        .filter(Boolean),
     [accts]
   );
+  const handleSet = useMemo(() => new Set(handles.map((h) => h.toLowerCase())), [handles]);
 
   // Reduce to the latest snapshot per (handle, day).
   const series = useMemo(() => {
@@ -41,8 +48,9 @@ export default function Growth() {
       const f = s.fields;
       const at = f["Snapshot At"];
       if (!at) continue;
-      const day = String(at).slice(0, 10);
       const h = String(f["Account Handle"] || "");
+      if (!handleSet.has(h.toLowerCase())) continue;
+      const day = String(at).slice(0, 10);
       byDay[day] = byDay[day] || {};
       const prev = byDay[day][h];
       if (!prev || at > prev.at) {
@@ -70,7 +78,7 @@ export default function Growth() {
       }
       return { day: day.slice(5), followers, views };
     });
-  }, [snaps, scope]);
+  }, [snaps, scope, handleSet]);
 
   // daily deltas (growth)
   const deltas = useMemo(() => {

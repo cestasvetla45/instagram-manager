@@ -19,7 +19,9 @@ export default function Analytics() {
 
   useEffect(() => {
     Promise.all([
-      fetch("/api/reels?type=our").then((r) => r.json()),
+      // limit=500 covers all "our" reels (well under the API's max) so KPIs
+      // aren't skewed by only sampling the top-200-by-views slice.
+      fetch("/api/reels?type=our&limit=500").then((r) => r.json()),
       fetch("/api/reels?type=inspiration").then((r) => r.json()),
       fetch("/api/snapshots").then((r) => r.json()),
     ]).then(([a, b, c]) => {

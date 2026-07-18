@@ -13,7 +13,10 @@ export default function ReelGallery({ type, title, subtitle }: { type: "inspirat
 
   function load() {
     setLoading(true);
-    fetch(`/api/reels?type=${type}`).then((r) => r.json()).then((j) => {
+    // limit=500 covers all "our" reels (well under the API's max) so the
+    // Likes/Comments/Engagement sorts aren't silently missing reels that
+    // fell outside the default 200-row, sorted-by-views page.
+    fetch(`/api/reels?type=${type}&limit=500`).then((r) => r.json()).then((j) => {
       setRecs(j.records || []);
       setLoading(false);
     });

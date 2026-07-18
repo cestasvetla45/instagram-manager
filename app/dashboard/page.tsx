@@ -63,6 +63,7 @@ type Account = {
     Handle: string;
     Followers: number;
     "Full Name": string;
+    Active?: boolean;
   };
 };
 
@@ -87,8 +88,15 @@ export default function Dashboard() {
     }).catch(() => setLoading(false));
   }, []);
 
+  // Archived accounts (active === false) are excluded from the live roster —
+  // they'd otherwise inflate totals with stale/no-longer-tracked accounts.
   const handles = useMemo(
-    () => accts.map((a) => String(a.fields.Handle || "")).filter(Boolean).sort(),
+    () =>
+      accts
+        .filter((a) => a.fields.Active !== false)
+        .map((a) => String(a.fields.Handle || ""))
+        .filter(Boolean)
+        .sort(),
     [accts]
   );
 
