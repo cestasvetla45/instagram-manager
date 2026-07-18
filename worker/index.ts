@@ -32,6 +32,62 @@ const VIRAL_INTERVAL_MS = 10 * 60 * 1000; // every ~10 min
 const SNAPSHOT_INTERVAL_MS = 30 * 60 * 1000; // every ~30 min
 const CATEGORIZE_INTERVAL_MS = 2 * 60 * 1000; // kick every ~2 min (fire-and-forget)
 
+const NOTIFY_TIMEOUT_MS = 10 * 1000;
+const NOTIFY_URL_LIMIT = 3;
+
+// Best-effort ping to TeamFlow so the Discord bot can announce freshly
+// detected reels. Looks up the active VA for the account (if any), then
+// POSTs to TeamFlow's /api/notify/new-reel. Silently skipped when the
+// TEAMFLOW_URL / TEAMFLOW_CRON_SECRET env vars aren't set, and never lets a
+// failure here break the beat.
+async function notifyTeamFlowNewReels(handle: string, added: number, urls: string[]): Promise<void> {
+  const base = process.env.TEAMFLOW_URL;
+  const secret = process.env.TEAMFLOW_CRON_SECRET;
+  if (!base || !secret) return;
+
+  try {
+    let vaName: string | null = null;
+    try {
+      const { data } = await db()
+        .from("account_assignments")
+        .select("va_name")
+        .eq("account_handle", handle)
+        .eq("is_active", true)
+        .limit(1)
+        .maybeSingle();
+      vaName = (data as any)?.va_name || null;
+    } catch (e: any) {
+      console.error(`notifyTeamFlowNewReels(${handle}) VA lookup error:`, e?.message || e);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), NOTIFY_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${base.replace(/\/+$/, "")}/api/notify/new-reel`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${secret}`,
+        },
+        body: JSON.stringify({
+          handle,
+          added,
+          urls: urls.slice(0, NOTIFY_URL_LIMIT),
+          va_name: vaName || undefined,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        console.error(`notifyTeamFlowNewReels(${handle}) non-OK response: ${res.status}`);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (e: any) {
+    console.error(`notifyTeamFlowNewReels(${handle}) error:`, e?.message || e);
+  }
+}
+
 let beatCount = 0;
 let running = false;
 let categorizing = false; // only one Gemini categorization run at a time
@@ -365,6 +421,13 @@ async function runBeat() {
       try {
         const np = await detectAndAddNewPostsForAccount(ourHandle);
         ingested += np.added;
+        if (np.added > 0) {
+          try {
+            await notifyTeamFlowNewReels(ourHandle, np.added, np.urls || []);
+          } catch (e: any) {
+            console.error(`notifyTeamFlowNewReels(${ourHandle}) error:`, e?.message || e);
+          }
+        }
       } catch (e: any) {
         console.error(`detectAndAddNewPosts(${ourHandle}) error:`, e?.message || e);
       }

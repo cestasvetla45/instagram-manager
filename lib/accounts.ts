@@ -9,9 +9,11 @@ const nowISO = () => new Date().toISOString();
 // scheduler calls right after refreshing an OUR account (P1 lane), so newly
 // posted reels are picked up within the same beat instead of waiting for a
 // separate all-accounts sweep.
-export async function detectAndAddNewPostsForAccount(handle: string): Promise<{ handle: string; added: number }> {
+export async function detectAndAddNewPostsForAccount(
+  handle: string
+): Promise<{ handle: string; added: number; urls: string[] }> {
   const clean = String(handle || "").trim();
-  if (!clean) return { handle: clean, added: 0 };
+  if (!clean) return { handle: clean, added: 0, urls: [] };
 
   const { data: reels } = await db()
     .from(TABLES.ourReels)
@@ -20,6 +22,7 @@ export async function detectAndAddNewPostsForAccount(handle: string): Promise<{ 
   const known = new Set((reels || []).map((r: any) => String(r.shortcode || "").toLowerCase()));
 
   let added = 0;
+  const urls: string[] = [];
   try {
     const recent = await scrapeUserReels(clean, 500);
     for (const reel of recent) {
@@ -29,6 +32,7 @@ export async function detectAndAddNewPostsForAccount(handle: string): Promise<{ 
         await saveReel(reel.url, "our");
         known.add(sc);
         added++;
+        urls.push(reel.url);
       } catch {
         /* skip */
       }
@@ -36,7 +40,7 @@ export async function detectAndAddNewPostsForAccount(handle: string): Promise<{ 
   } catch {
     /* skip account */
   }
-  return { handle: clean, added };
+  return { handle: clean, added, urls };
 }
 
 // All-accounts sweep — kept for compat with lib/refresh.ts's legacy full
