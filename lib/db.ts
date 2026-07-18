@@ -109,6 +109,11 @@ export function accountToFields(r: any) {
       "Profile Pic": att(r.profile_pic_url),
       Notes: r.notes,
       "Date Added": r.date_added,
+      // Archived accounts still come back from this endpoint — consumers that
+      // build "active roster" views (dashboard, growth, top-reels, overview)
+      // should filter on this. our_accounts uses `active`, inspiration_accounts
+      // uses `is_active`; fall back to true (not archived) if neither is set.
+      Active: r.active !== undefined ? r.active !== false : r.is_active !== false,
     },
   };
 }

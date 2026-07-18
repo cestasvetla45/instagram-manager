@@ -16,7 +16,7 @@ export async function GET(req: NextRequest) {
     const table = isOur ? TABLES.ourReels : TABLES.inspirationReels;
     let query = db()
       .from(table)
-      .select("*")
+      .select("*", { count: "exact" })
       .order(isOur ? "views" : "inspiration_score", { ascending: false, nullsFirst: false })
       .limit(limit);
     if (niche === "UNTAGGED") query = query.or("niche.is.null,niche.eq.");
@@ -28,18 +28,27 @@ export async function GET(req: NextRequest) {
     const subCat = req.nextUrl.searchParams.get("sub_category");
     const tray = req.nextUrl.searchParams.get("tray");
     const viralOnly = req.nextUrl.searchParams.get("viral");
-    const needsReview = req.nextUrl.searchParams.get("needs_review");
+    const needsReview = req.nextUrl.searchParams.get("needs_review") === "true";
     if (!isOur && subCat) query = query.eq("sub_category", subCat);
     if (!isOur && tray) query = query.eq("tray", tray);
     if (!isOur && viralOnly === "true") query = query.eq("is_viral", true);
     // ⚠️ Needs review — never categorized, or below the confidence bar.
-    if (!isOur && needsReview === "true") {
-      query = query.or("sub_category.is.null,sub_category_confidence.lt.0.85");
-    }
-    const { data, error } = await query;
+    // NOTE: two .or() calls on one supabase-js query conflict and silently
+    // return [] (the niche=UNTAGGED filter above already uses .or()), so this
+    // one is applied in JS instead of chaining a second .or().
+    let { data, error, count } = await query;
     if (error) throw error;
+    let rows = data || [];
+    if (!isOur && needsReview) {
+      rows = rows.filter((r: any) => r.sub_category == null || Number(r.sub_category_confidence ?? 0) < 0.85);
+    }
     return NextResponse.json(
-      { records: (data || []).map((r) => reelToFields(r, isOur)) },
+      {
+        records: rows.map((r) => reelToFields(r, isOur)),
+        // When needs_review is applied in JS, `count` reflects the broader
+        // (pre-filter) match — fall back to the filtered row count instead.
+        total: !isOur && needsReview ? rows.length : count ?? rows.length,
+      },
       { headers: { "Cache-Control": "s-maxage=30, stale-while-revalidate=60" } }
     );
   } catch (e: any) {
