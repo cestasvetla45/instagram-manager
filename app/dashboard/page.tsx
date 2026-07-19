@@ -298,7 +298,7 @@ export default function Dashboard() {
 
       {/* KPI Cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12, marginBottom: 20 }}>
-        <KPICard label="Total Views" value={fmt(totals.totalViews)} color="#e1306c" />
+        <KPICard label="Views (reels posted in range)" value={fmt(totals.totalViews)} color="#e1306c" />
         <KPICard label="Followers" value={fmt(totals.totalFollowers)} color="#833ab4" />
         <KPICard label="Reels Posted" value={fmt(totals.totalReels)} color="#3ad1c6" />
         <KPICard label="Total Likes" value={fmt(totals.totalLikes)} color="#f1c40f" />
@@ -309,7 +309,7 @@ export default function Dashboard() {
       {/* Chart: Views Over Time + Post Markers */}
       <div className="panel" style={{ padding: 16, marginBottom: 20 }}>
         <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
-          <strong style={{ fontSize: 14 }}>📈 Views Over Time</strong>
+          <strong style={{ fontSize: 14 }}>📈 Total Account Views Over Time (cumulative)</strong>
           <span className="muted" style={{ fontSize: 11 }}>● dots = new reel posted</span>
         </div>
         {chartData.length > 0 ? (
@@ -321,9 +321,9 @@ export default function Dashboard() {
               <Tooltip contentStyle={TIP} formatter={(v: any) => fmt(Number(v))} />
               <Legend />
               {selectedAcct === "all" ? (
-                <Line type="monotone" dataKey="Combined" stroke="#e1306c" strokeWidth={2} dot={false} name="Combined Views" />
+                <Line type="monotone" dataKey="Combined" stroke="#e1306c" strokeWidth={2} dot={false} name="Total account views (cumulative)" />
               ) : (
-                <Line type="monotone" dataKey={selectedAcct} stroke="#e1306c" strokeWidth={2} dot={false} name={`@${selectedAcct}`} />
+                <Line type="monotone" dataKey={selectedAcct} stroke="#e1306c" strokeWidth={2} dot={false} name={`@${selectedAcct} views (cumulative)`} />
               )}
               {/* Own filtered data array: Recharts renders a Scatter symbol for
                   EVERY row of the chart's shared data (even when dataKey is
@@ -343,8 +343,8 @@ export default function Dashboard() {
             <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
               <th style={{ padding: "12px 16px", fontWeight: 600 }}>Account</th>
               <th style={{ padding: "12px 8px", fontWeight: 600, textAlign: "right" }}>Followers</th>
-              <th style={{ padding: "12px 8px", fontWeight: 600, textAlign: "right" }}>Reels</th>
-              <th style={{ padding: "12px 8px", fontWeight: 600, textAlign: "right" }}>Total Views</th>
+              <th style={{ padding: "12px 8px", fontWeight: 600, textAlign: "right" }}>Reels (in range)</th>
+              <th style={{ padding: "12px 8px", fontWeight: 600, textAlign: "right" }}>Views (in range)</th>
               <th style={{ padding: "12px 8px", fontWeight: 600, textAlign: "right" }}>Avg Views</th>
               <th style={{ padding: "12px 8px", fontWeight: 600, textAlign: "right" }}>Likes</th>
               <th style={{ padding: "12px 8px", fontWeight: 600, textAlign: "right" }}>ER%</th>
