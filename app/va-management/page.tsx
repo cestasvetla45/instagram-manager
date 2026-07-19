@@ -113,7 +113,10 @@ export default function VaManagementPage() {
       jget("/api/va-management"),
       jget("/api/va-management/assign"),
     ]);
+    // Archived accounts shouldn't be assignable/schedulable — they're retired,
+    // not part of the active roster (this feeds the Assign/Schedule/Log tabs).
     const handles = (acc.records || [])
+      .filter((r: any) => r.fields?.Active !== false)
       .map((r: any) => r.fields?.Handle)
       .filter(Boolean)
       .sort((x: string, y: string) => x.localeCompare(y));
