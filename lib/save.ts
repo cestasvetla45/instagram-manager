@@ -61,7 +61,7 @@ export async function saveReel(
 
   const { data: existingRows } = await db()
     .from(table)
-    .select(isOur ? "id, niche, video_url, format" : "id, niche, video_url, downloaded_at, format")
+    .select(isOur ? "id, niche, video_url, format, views" : "id, niche, video_url, downloaded_at, format, views")
     .eq("reel_url", r.url)
     .limit(1);
   const existing: any = existingRows?.[0] || null;
@@ -150,6 +150,24 @@ export async function saveReel(
 
   let created = false;
   if (existing) {
+    // Never clobber good data with a degraded scrape: strip null/empty fields
+    // (a maintenance-mode response would otherwise null out posted_at,
+    // thumbnail, caption…), and when the scrape returned no stats at all while
+    // the stored row has real ones, keep the stored stats — this was the
+    // source of view counts collapsing to 0 and re-inflating between beats.
+    for (const k of Object.keys(row)) {
+      if (row[k] == null || row[k] === "") delete row[k];
+    }
+    // Views need an independent guard: the maintenance fallback endpoint
+    // (get_media_data.php) returns real likes/comments but NO view count, so
+    // a "views 0, likes fine" response is still a views-clobber.
+    if (!r.views && Number(existing.views) > 0) {
+      for (const k of ["views", "engagement_rate", "view_follow_ratio"]) delete row[k];
+    }
+    const degraded = !r.views && !r.likes && !r.comments;
+    if (degraded && Number(existing.views) > 0) {
+      for (const k of ["likes", "comments", "shares", "saves", "followers_at_scrape"]) delete row[k];
+    }
     await db().from(table).update(row).eq("id", existing.id);
   } else {
     if (!isOur) {

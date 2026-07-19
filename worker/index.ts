@@ -147,18 +147,17 @@ async function processAccount(handle: string, isOur: boolean): Promise<ProcessRe
       for (const r of existing) {
         try {
           const fresh = await scrapeReel(r.reel_url);
-          await db()
-            .from(table)
-            .update({
-              views: fresh.views,
-              likes: fresh.likes,
-              comments: fresh.comments,
-              shares: fresh.shares,
-              saves: fresh.saves,
-              [handleCol]: fresh.authorHandle || handle,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("reel_url", r.reel_url);
+          // Degraded-scrape guard — see bulk path: never zero-out real stats.
+          const patch: Record<string, any> = {
+            [handleCol]: fresh.authorHandle || handle,
+            updated_at: new Date().toISOString(),
+          };
+          if (fresh.views > 0) patch.views = fresh.views;
+          if (fresh.likes > 0) patch.likes = fresh.likes;
+          if (fresh.comments > 0) patch.comments = fresh.comments;
+          if (fresh.shares > 0) patch.shares = fresh.shares;
+          if (fresh.saves > 0) patch.saves = fresh.saves;
+          await db().from(table).update(patch).eq("reel_url", r.reel_url);
           refreshed++;
         } catch {
           perReelFailed++;
@@ -241,15 +240,15 @@ async function processAccount(handle: string, isOur: boolean): Promise<ProcessRe
           }
           continue;
         }
-        await db()
-          .from(table)
-          .update({
-            views: r.views,
-            likes: r.likes,
-            comments: r.comments,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("reel_url", r.url);
+        // Degraded-scrape guard: the provider sometimes returns items with
+        // zeroed stats; writing those would collapse real view counts (the
+        // dashboard's "views dropped 375K then recovered" dips). Only write
+        // stats the payload actually has.
+        const patch: Record<string, any> = { updated_at: new Date().toISOString() };
+        if (r.views > 0) patch.views = r.views;
+        if (r.likes > 0) patch.likes = r.likes;
+        if (r.comments > 0) patch.comments = r.comments;
+        await db().from(table).update(patch).eq("reel_url", r.url);
         refreshed++;
       }
 
