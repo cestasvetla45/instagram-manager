@@ -5,14 +5,15 @@ export const runtime = "nodejs";
 
 const norm = (h: string) => String(h || "").replace(/^@/, "").trim();
 
-// GET /api/inspiration-reels/manage?page=1&limit=50&handle=&niche=&tray=&viral=&sort=views|recent|score|viral&search=
-//   &winners=true  &minViews=  &from=YYYY-MM-DD  &to=YYYY-MM-DD
+// GET /api/inspiration-reels/manage?page=1&limit=50&handle=&niche=&tray=&viral=&sort=views|recent|posted|score|viral&search=
+//   &winners=true  &minViews=  &from=YYYY-MM-DD  &to=YYYY-MM-DD  &authors=handle1,handle2,...
 export async function GET(req: NextRequest) {
   try {
     const sp = req.nextUrl.searchParams;
     const page = Math.max(1, Number(sp.get("page") || 1));
     const limit = Math.min(200, Math.max(1, Number(sp.get("limit") || 50)));
     const handle = norm(sp.get("handle") || "");
+    const authorsParam = sp.get("authors") || "";
     const niche = sp.get("niche") || "";
     const tray = sp.get("tray") || "";
     const viral = sp.get("viral");
@@ -26,6 +27,13 @@ export async function GET(req: NextRequest) {
     let q = db().from(TABLES.inspirationReels).select("*", { count: "exact" });
 
     if (handle) q = q.ilike("author_handle", handle);
+    // Multiple authors (e.g. every profile in a category) — comma-separated,
+    // lowercase-matched since author_handle is stored lowercase.
+    if (authorsParam) {
+      const authors = authorsParam.split(",").map(norm).filter(Boolean);
+      if (authors.length) q = q.in("author_handle", authors);
+      else return NextResponse.json({ reels: [], total: 0, page });
+    }
     if (niche && niche !== "ALL") {
       if (niche === "UNTAGGED") q = q.or("niche.is.null,niche.eq.");
       else q = q.ilike("niche", niche);
@@ -42,6 +50,7 @@ export async function GET(req: NextRequest) {
     if (safeSearch) q = q.or(`caption.ilike.%${safeSearch}%,author_handle.ilike.%${safeSearch}%`);
 
     if (sort === "recent") q = q.order("date_scraped", { ascending: false, nullsFirst: false });
+    else if (sort === "posted") q = q.order("posted_at", { ascending: false, nullsFirst: false });
     else if (sort === "score") q = q.order("inspiration_score", { ascending: false, nullsFirst: false });
     else if (sort === "viral") q = q.order("viral_score", { ascending: false, nullsFirst: false });
     else q = q.order("views", { ascending: false, nullsFirst: false });
