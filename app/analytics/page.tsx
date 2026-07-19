@@ -24,9 +24,21 @@ export default function Analytics() {
       fetch("/api/reels?type=our&limit=500").then((r) => r.json()),
       fetch("/api/reels?type=inspiration").then((r) => r.json()),
       fetch("/api/snapshots").then((r) => r.json()),
-    ]).then(([a, b, c]) => {
-      setOur(a.records || []);
+      fetch("/api/accounts?type=our").then((r) => r.json()),
+    ]).then(([a, b, c, acctsRes]) => {
+      // Archived accounts must not leak into "our" aggregates/KPIs.
+      const archived = new Set(
+        (acctsRes.records || [])
+          .filter((rec: any) => rec.fields.Active === false)
+          .map((rec: any) => String(rec.fields.Handle || "").toLowerCase())
+      );
+      const ourActive = (a.records || []).filter(
+        (r: any) => !archived.has(String(r.fields["Account Handle"] || "").toLowerCase())
+      );
+      setOur(ourActive);
       setInsp(b.records || []);
+      // /api/snapshots already excludes archived-account rows server-side
+      // (snapshots only carry a reel URL, not an account handle, to filter on here).
       setSnaps(c.records || []);
       setLoading(false);
     });

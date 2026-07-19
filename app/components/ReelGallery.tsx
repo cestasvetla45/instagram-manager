@@ -5,6 +5,7 @@ import ConfigBanner from "./ConfigBanner";
 
 export default function ReelGallery({ type, title, subtitle }: { type: "inspiration" | "our"; title: string; subtitle: string }) {
   const [recs, setRecs] = useState<any[]>([]);
+  const [archivedHandles, setArchivedHandles] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("Views");
@@ -16,8 +17,21 @@ export default function ReelGallery({ type, title, subtitle }: { type: "inspirat
     // limit=500 covers all "our" reels (well under the API's max) so the
     // Likes/Comments/Engagement sorts aren't silently missing reels that
     // fell outside the default 200-row, sorted-by-views page.
-    fetch(`/api/reels?type=${type}&limit=500`).then((r) => r.json()).then((j) => {
+    const requests: Promise<any>[] = [fetch(`/api/reels?type=${type}&limit=500`).then((r) => r.json())];
+    // "Our Reels" reflects the current roster only — without this, archived
+    // accounts' historical reels mix into the gallery alongside the active ones.
+    if (type === "our") requests.push(fetch(`/api/accounts?type=our`).then((r) => r.json()));
+    Promise.all(requests).then(([j, a]) => {
       setRecs(j.records || []);
+      if (a) {
+        setArchivedHandles(
+          new Set(
+            (a.records || [])
+              .filter((rec: any) => rec.fields.Active === false)
+              .map((rec: any) => String(rec.fields.Handle || "").toLowerCase())
+          )
+        );
+      }
       setLoading(false);
     });
   }
@@ -43,6 +57,9 @@ export default function ReelGallery({ type, title, subtitle }: { type: "inspirat
 
   const filtered = useMemo(() => {
     let r = recs;
+    if (archivedHandles.size) {
+      r = r.filter((x) => !archivedHandles.has(String(x.fields["Account Handle"] || "").toLowerCase()));
+    }
     if (q) {
       const s = q.toLowerCase();
       r = r.filter((x) => {
@@ -55,7 +72,7 @@ export default function ReelGallery({ type, title, subtitle }: { type: "inspirat
       });
     }
     return [...r].sort((a, b) => Number(b.fields[sort] || 0) - Number(a.fields[sort] || 0));
-  }, [recs, q, sort]);
+  }, [recs, archivedHandles, q, sort]);
 
   return (
     <div>
