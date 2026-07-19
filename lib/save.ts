@@ -52,7 +52,7 @@ async function getAccountNiche(handle: string, isOur: boolean): Promise<string> 
 export async function saveReel(
   url: string,
   target: "inspiration" | "our",
-  opts: { extra?: Record<string, any> } = {}
+  opts: { extra?: Record<string, any>; fallback?: Record<string, any> } = {}
 ): Promise<{ reel: NormalizedReel; created: boolean }> {
   const isOur = target === "our";
   const table = isOur ? TABLES.ourReels : TABLES.inspirationReels;
@@ -135,6 +135,17 @@ export async function saveReel(
     }
   }
 
+  // Gap-filling fallback (e.g. the feed stub from get_ig_user_reels): only
+  // fills fields the full scrape left empty/zero — when the primary media
+  // endpoint is down, scrapeReel's fallback path returns no owner, no views
+  // and no posted date, which used to insert orphan rows with a blank
+  // account_handle that no per-account view (or refresh loop) ever matched.
+  if (opts.fallback) {
+    for (const [k, v] of Object.entries(opts.fallback)) {
+      if (v == null || v === "") continue;
+      if (row[k] == null || row[k] === "" || row[k] === 0) row[k] = v;
+    }
+  }
   if (opts.extra) Object.assign(row, opts.extra);
 
   let created = false;

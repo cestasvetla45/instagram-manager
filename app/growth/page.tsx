@@ -19,7 +19,9 @@ export default function Growth() {
 
   useEffect(() => {
     Promise.all([
-      fetch("/api/account-snapshots").then((r) => r.json()),
+      // Explicit high limit — the API defaults to 500, which truncates the
+      // history needed for a true "since tracking began" growth view.
+      fetch("/api/account-snapshots?limit=5000").then((r) => r.json()),
       fetch("/api/accounts?type=our").then((r) => r.json()),
     ]).then(([s, a]) => {
       setSnaps(s.records || []);

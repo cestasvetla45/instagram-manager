@@ -77,7 +77,10 @@ export default function Dashboard() {
 
   useEffect(() => {
     Promise.all([
-      fetch("/api/account-snapshots").then((r) => r.json()),
+      // Explicit high limit — the API defaults to 500, which (spread across 7
+      // accounts snapshotting every ~15-30min) only covers the last few days
+      // and silently truncates the "All time" chart range.
+      fetch("/api/account-snapshots?limit=5000").then((r) => r.json()),
       fetch("/api/accounts?type=our").then((r) => r.json()),
       fetch("/api/reels?type=our&limit=500").then((r) => r.json()),
     ]).then(([s, a, r]) => {
@@ -127,32 +130,57 @@ export default function Dashboard() {
     });
   }, [reels, cutoffDate, selectedAcct]);
 
-  // Build chart data: views over time, one series per account + combined
+  // Build chart data: views over time, one series per account + combined.
+  // Archived accounts are excluded (via `handles`, active-only), and each account
+  // contributes at most one value per time bucket (keyed write, not additive) so
+  // duplicate/near-duplicate snapshot rows from overlapping worker runs can't
+  // double-count into the Combined line.
   const chartData = useMemo(() => {
-    const byTime: Record<string, any> = {};
+    const byTime: Record<string, { at: string; label: string; accounts: Record<string, number>; posts?: number }> = {};
     for (const s of filteredSnaps) {
       const at = s.fields["Snapshot At"];
       if (!at) continue;
       const h = String(s.fields["Account Handle"] || "");
-      const key = at.substring(0, 16); // group by hour
-      byTime[key] = byTime[key] || { at, label: shortDateTime(at), Combined: 0, posts: 0 };
-      byTime[key][h] = Number(s.fields["Total Views"] || 0);
-      byTime[key].Combined += Number(s.fields["Total Views"] || 0);
-      byTime[key].Reels = Number(s.fields["Reel Count"] || 0);
+      if (!handles.includes(h)) continue; // exclude archived/unknown accounts
+      const key = at.substring(0, 16); // minute-level bucket
+      byTime[key] = byTime[key] || { at, label: shortDateTime(at), accounts: {} };
+      byTime[key].accounts[h] = Number(s.fields["Total Views"] || 0); // last value for this account/bucket wins
     }
 
-    // Add markers for when new reels were posted
-    for (const r of filteredReels) {
-      const postedAt = r.fields["Posted At"];
-      if (!postedAt) continue;
-      const key = postedAt.substring(0, 16);
-      if (byTime[key]) {
-        byTime[key].posts++;
+    // New-post markers: derived from reel_count deltas between consecutive
+    // snapshots of the same account, not from every snapshot timestamp.
+    const byAccount: Record<string, Snapshot[]> = {};
+    for (const s of filteredSnaps) {
+      const h = String(s.fields["Account Handle"] || "");
+      if (!handles.includes(h)) continue;
+      (byAccount[h] = byAccount[h] || []).push(s);
+    }
+    for (const h of Object.keys(byAccount)) {
+      byAccount[h].sort((a, b) => a.fields["Snapshot At"].localeCompare(b.fields["Snapshot At"]));
+      const arr = byAccount[h];
+      for (let i = 1; i < arr.length; i++) {
+        const delta = Number(arr[i].fields["Reel Count"] || 0) - Number(arr[i - 1].fields["Reel Count"] || 0);
+        if (delta > 0) {
+          const key = arr[i].fields["Snapshot At"].substring(0, 16);
+          if (byTime[key]) byTime[key].posts = (byTime[key].posts || 0) + delta;
+        }
       }
     }
 
-    return Object.values(byTime).sort((a: any, b: any) => a.at.localeCompare(b.at));
-  }, [filteredSnaps, filteredReels]);
+    return Object.values(byTime)
+      .sort((a, b) => a.at.localeCompare(b.at))
+      .map((d) => {
+        const out: any = { at: d.at, label: d.label };
+        let combined = 0;
+        for (const h of Object.keys(d.accounts)) {
+          out[h] = d.accounts[h];
+          combined += d.accounts[h];
+        }
+        out.Combined = combined;
+        if (d.posts) out.posts = d.posts; // omit (undefined) when 0 so Scatter doesn't plot a point
+        return out;
+      });
+  }, [filteredSnaps, handles]);
 
   // Current stats per account
   const accountStats = useMemo(() => {
@@ -172,6 +200,16 @@ export default function Dashboard() {
       const avgViews = accountReels.length ? Math.round(totalViews / accountReels.length) : 0;
       const er = totalViews > 0 ? ((totalLikes + totalComments) / totalViews * 100).toFixed(1) : "0.0";
       const acctInfo = accts.find((a) => String(a.fields.Handle).toLowerCase() === h.toLowerCase());
+      // `reels` is fetched sorted by Views desc (for top-reels ranking), so the
+      // most-viewed reel is NOT the most recently posted one — find the actual
+      // max Posted At. Deliberately computed over ALL reels (not the date-range
+      // filtered set): "Last Reel" answers "when did this account last post?",
+      // which shouldn't go blank/stale when a short range like 7d is selected.
+      const latestReelAt = reels.reduce((latest: string, r) => {
+        if (String(r.fields["Account Handle"] || "").toLowerCase() !== h.toLowerCase()) return latest;
+        const t = r.fields["Posted At"];
+        return t && (!latest || t > latest) ? t : latest;
+      }, "");
       return {
         handle: h,
         fullName: acctInfo?.fields["Full Name"] || "",
@@ -183,10 +221,19 @@ export default function Dashboard() {
         avgViews,
         engagementRate: er,
         lastSync: s?.fields["Snapshot At"] || "—",
-        latestReel: accountReels[0]?.fields["Posted At"] || "—",
+        latestReel: latestReelAt || "—",
       };
     });
-  }, [filteredSnaps, filteredReels, handles, accts]);
+  }, [filteredSnaps, filteredReels, reels, handles, accts]);
+
+  // `filteredReels` inherits the Views-desc sort from the API (used for the
+  // per-account totals above, order doesn't matter there); re-sort by Posted
+  // At desc for the "Recent Reels" panel so it actually shows recent reels.
+  const recentReels = useMemo(() => {
+    return [...filteredReels].sort((a, b) =>
+      String(b.fields["Posted At"] || "").localeCompare(String(a.fields["Posted At"] || ""))
+    );
+  }, [filteredReels]);
 
   // Combined totals
   const totals = useMemo(() => {
@@ -278,7 +325,10 @@ export default function Dashboard() {
               ) : (
                 <Line type="monotone" dataKey={selectedAcct} stroke="#e1306c" strokeWidth={2} dot={false} name={`@${selectedAcct}`} />
               )}
-              <Scatter dataKey="posts" fill="#f1c40f" shape="star" name="New Posts" />
+              {/* Own filtered data array: Recharts renders a Scatter symbol for
+                  EVERY row of the chart's shared data (even when dataKey is
+                  undefined → drawn at 0), which painted a star on every tick. */}
+              <Scatter data={chartData.filter((d: any) => d.posts > 0)} dataKey="posts" fill="#f1c40f" shape="star" name="New Posts" />
             </ComposedChart>
           </ResponsiveContainer>
         ) : (
@@ -333,7 +383,7 @@ export default function Dashboard() {
       <div className="panel" style={{ padding: 16, marginTop: 20 }}>
         <strong style={{ fontSize: 14, marginBottom: 12, display: "block" }}>🎬 Recent Reels</strong>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
-          {filteredReels.slice(0, 12).map((r, i) => {
+          {recentReels.slice(0, 12).map((r, i) => {
             const f = r.fields;
             const color = COLORS[handles.indexOf(String(f["Account Handle"])) % COLORS.length];
             return (

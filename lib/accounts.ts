@@ -29,7 +29,22 @@ export async function detectAndAddNewPostsForAccount(
       const sc = (reel.shortcode || "").toLowerCase();
       if (!sc || known.has(sc)) continue;
       try {
-        await saveReel(reel.url, "our");
+        await saveReel(reel.url, "our", {
+          // The reel came from THIS account's own feed — force the handle so a
+          // degraded scrape (no owner in the response) can't insert an orphan
+          // row that detection would then re-add (and re-notify) every hour.
+          extra: { account_handle: clean },
+          // Feed stub data fills whatever the full scrape left empty.
+          fallback: {
+            views: reel.views,
+            likes: reel.likes,
+            comments: reel.comments,
+            caption: reel.caption,
+            thumbnail_url: reel.thumbnailUrl,
+            posted_date: reel.postedDate,
+            posted_at: reel.postedAtISO,
+          },
+        });
         known.add(sc);
         added++;
         urls.push(reel.url);
